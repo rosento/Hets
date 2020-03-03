@@ -86,6 +86,7 @@ import OWL2.Logic_OWL2
 import RDF.Logic_RDF
 #endif
 import Comorphisms.DynLogicList
+import UMLState.Logic_UMLState
 
 logicList :: [AnyLogic]
 logicList =
@@ -135,6 +136,7 @@ logicList =
 #endif
   , Logic CSMOF
   , Logic QVTR
+  , Logic UMLState
   ] ++ dynLogicList
 
 addLogicName :: AnyLogic -> (String, AnyLogic)

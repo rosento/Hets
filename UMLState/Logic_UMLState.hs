@@ -1,4 +1,5 @@
 {-# LANGUAGE MultiParamTypeClasses , FlexibleContexts #-}
+
 {- |
  TODO adjust comments
 Module      :  ./UMLState/Logic_UMLState.hs
@@ -100,12 +101,24 @@ instance GetRange BASIC_SPEC where
 instance Language UMLState where
 
 -- BEGIN parsing
+
+
+
+namedSpec :: [t0] -> PrefixMap -> AParser st NAMED_SPEC
+namedSpec bi fooTODO = do
+  key "spec"
+  name <- Ident <$> scanLetterWord
+  skipSmart
+  contents <- basicSpec bi fooTODO 
+  return $ name := contents
+
 basicSpec :: [t0] -> PrefixMap -> AParser st BASIC_SPEC
 basicSpec bi _ = do
   ais <- actItems `sepBy` semiT
   semiT
   bis <- basicItems `sepBy` semiT
   return $ Basic ais bis
+
 actItems = Acts <$> (actS *> acts)
 actS = pluralKeyword "action"
 acts = actItem `sepBy` semiT

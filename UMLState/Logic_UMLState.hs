@@ -8,7 +8,7 @@ Copyright   :  (c) Tobias Rosenberger, Swansea University and Universit{'e} Gren
 License     :  GPLv2 or higher, see LICENSE.txt
 
 Maintainer  :  tobias.rosenberger@univ-grenoble-alpes.fr
-Stability   :  provisional
+Stability   :  experimental
 Portability :  non-portable (imports Logic.Logic)
 -}
 
@@ -26,6 +26,7 @@ import Common.Parsec
 
 import Text.Parsec
 import Text.Parsec.Expr
+import Text.Parsec.String
 
 
 -- BEGIN AS
@@ -104,7 +105,7 @@ instance Language UMLState where
 
 
 
-namedSpec :: [t0] -> PrefixMap -> AParser st NAMED_SPEC
+namedSpec :: [t0] -> PrefixMap -> GenParser Char st NAMED_SPEC
 namedSpec bi fooTODO = do
   key "spec"
   name <- Ident <$> scanLetterWord
@@ -112,7 +113,7 @@ namedSpec bi fooTODO = do
   contents <- basicSpec bi fooTODO 
   return $ name := contents
 
-basicSpec :: [t0] -> PrefixMap -> AParser st BASIC_SPEC
+basicSpec :: [t0] -> PrefixMap -> GenParser Char st BASIC_SPEC
 basicSpec bi _ = do
   ais <- actItems `sepBy` semiT
   semiT

@@ -542,7 +542,7 @@ data InType =
   | Qvt
   | TPTPIn
   | HtmlIn -- just to complain
-  | UMLState
+  | UMLStateIn
   deriving Eq
 
 instance Show InType where
@@ -571,7 +571,7 @@ instance Show InType where
     Xmi -> "xmi"
     Qvt -> "qvt"
     HtmlIn -> "html"
-    UMLState -> "umls"
+    UMLStateIn -> "umls"
 
 -- maybe this optional tree prefix can be omitted
 instance Read InType where
@@ -596,7 +596,7 @@ plainInTypes =
   , MaudeIn, TwelfIn
   , HolLightIn, IsaIn, ThyIn, PrfIn, OmdocIn, ProofCommand
   , CommonLogicIn False, CommonLogicIn True
-  , DgXml, FreeCADIn, Xmi, Qvt, TPTPIn , UMLState ]
+  , DgXml, FreeCADIn, Xmi, Qvt, TPTPIn , UMLStateIn ]
 
 aInTypes :: [InType]
 aInTypes = [ ATermIn x | x <- [BAF, NonBAF] ]

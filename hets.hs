@@ -52,6 +52,7 @@ import PGIP.Server
 import Maude.Maude2DG (anaMaudeFile)
 import LF.Twelf2DG (anaTwelfFile)
 import OMDoc.Import (anaOMDocFile)
+import UMLState.UMLState2DG (anaUMLStateFile)
 #ifdef HEXPAT
 import HolLight.HolLight2DG (anaHolLightFile)
 #endif
@@ -117,6 +118,7 @@ processFile opts file =
       MaudeIn -> anaMaudeFile opts file
       TwelfIn -> anaTwelfFile opts file
       OmdocIn -> anaOMDocFile opts file
+      UMLStateIn -> anaUMLStateFile opts file
       _ -> anaLib opts file
     case res of
       Just (ln, nEnv) ->

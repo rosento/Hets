@@ -1,4 +1,4 @@
-{-# LANGUAGE MultiParamTypeClasses , FlexibleContexts , TypeSynonymInstances , FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses , FlexibleContexts , TypeSynonymInstances , FlexibleInstances, DeriveDataTypeable #-}
 
 {- |
  TODO adjust comments
@@ -20,24 +20,30 @@ import qualified CASL.AS_Basic_CASL as C
 import qualified CASL.Formula as CF
 
 import Common.DocUtils
+import Common.ExtSign
 import Common.Id
 import ATerm.Conversion
 import Common.GlobalAnnotations
 import Common.AnnoState
 import Common.Lexer
 import Common.Parsec
-import Common.Result
+import Common.Result as R
 
 import Data.Set as Set
 import Data.Map as Map
 import Data.List as List
+import Data.Functor.Identity
+
+import qualified Data.Data as D
 
 import Control.Monad (when)
+import Control.Monad.Trans (lift)
 import Control.Monad.Trans.State as S
 
 import Text.Parsec
 import Text.Parsec.Expr
 import Text.Parsec.String
+import Text.ParserCombinators.Parsec.Char
 
 import CASL.ToDoc -- TODO just for ghci debugging
 
@@ -48,30 +54,30 @@ import CASL.ToDoc -- TODO just for ghci debugging
 -- BEGIN AS
 type SPEC_NAME = Token
 
-data NAMED_SPEC = SPEC_NAME := BASIC_SPEC deriving Show
-data BASIC_SPEC = Basic [BASIC_ITEMS] deriving Show
+data NAMED_SPEC = SPEC_NAME := BASIC_SPEC deriving (Eq,Ord,Show,D.Data)
+data BASIC_SPEC = Basic [BASIC_ITEMS] deriving (Eq,Ord,Show,D.Data)
 data BASIC_ITEMS = SigB SIG_ITEMS
                  | VarB VAR_ITEMS
                  | SenB SEN_ITEMS
                  | EvtB EVENT_ITEMS
-                 deriving Show
+                 deriving (Eq,Ord,Show,D.Data)
 
-data VAR_ITEMS = VarIs [VAR_NAME] deriving Show
+data VAR_ITEMS = VarIs [VAR_NAME] deriving (Eq,Ord,Show,D.Data)
 
 data SEN_ITEMS = TransB TRANS_ITEM
                | InitB STATE GUARD
                -- -- | FinalB STATE
-               deriving Show
-data EVENT_ITEMS = EvtIs [EVENT_ITEM] deriving Show
-data EVENT_ITEM = EvtI EVENT_NAME [VAR_NAME] deriving Show
+               deriving (Eq,Ord,Show,D.Data)
+data EVENT_ITEMS = EvtIs [EVENT_ITEM] deriving (Eq,Ord,Show,D.Data)
+data EVENT_ITEM = EvtI EVENT_NAME [VAR_NAME] deriving (Eq,Ord,Show,D.Data)
 data TERM = VarT VAR_NAME
           | ConstT NAT_LIT
           | TERM :+ TERM
           | TERM :- TERM
           | TERM :* TERM
           | TERM :/ TERM
-                deriving (Show, Eq)
-data NAT_OP = Plus | Minus | Times | Div deriving Show
+          deriving (Show,Ord,Eq,D.Data)
+data NAT_OP = Plus | Minus | Times | Div deriving (Eq,Ord,Show,D.Data)
 type VAR_NAME = Token
 
 type EVENT_NAME = Token
@@ -79,19 +85,21 @@ type NAT_LIT = Int
 
 data SIG_ITEMS = StateS [STATE_ITEM]
                --  -- | ChoiceS [STATE_ITEM]
-               deriving Show
-data STATE_ITEM = StateI STATE deriving Show
+               deriving (Eq,Ord,Show,D.Data)
+data STATE_ITEM = StateI STATE deriving (Eq,Ord,Show,D.Data)
 
 
 type STATE = Token
 
-data TRANS_ITEM = TransI STATE STATE TRANS_LABEL deriving Show
-data TRANS_LABEL = Label TRIGGER (Maybe GUARD) (Maybe ACTIONS) deriving Show
+data TRANS_ITEM = TransI STATE STATE TRANS_LABEL
+                deriving (Eq,Ord,Show,D.Data)
+data TRANS_LABEL = Label TRIGGER (Maybe GUARD) (Maybe ACTIONS)
+                 deriving (Eq,Ord,Show,D.Data)
 type TRIGGER = EVENT_ITEM
 type GUARD = FORMULA
 
-data ACTIONS = Acts [ACTION] deriving Show
-data ACTION = Act VAR_NAME TERM deriving Show
+data ACTIONS = Acts [ACTION] deriving (Eq,Ord,Show,D.Data)
+data ACTION = Assign VAR_NAME TERM deriving (Eq,Ord,Show,D.Data)
 
 data FORMULA = CompF TERM COMP_OP TERM
              | TrueF | FalseF
@@ -101,25 +109,27 @@ data FORMULA = CompF TERM COMP_OP TERM
              | FORMULA :=> FORMULA
              | FORMULA :<= FORMULA
              | FORMULA :<=> FORMULA
-             deriving (Show, Eq)
-data COMP_OP = Less | LessEq | Eq | GreaterEq | Greater deriving (Enum, Eq)
+             deriving (Eq,Ord,Show,D.Data)
+data COMP_OP = Less | LessEq | Eq | GreaterEq | Greater deriving (Enum,Eq,Ord,D.Data)
 -- END AS
 
 instance Show COMP_OP where
-  show Less = "<"
-  show LessEq = "<="
-  show Eq = "="
+  show Less      = "<"
+  show LessEq    = "<="
+  show Eq        = "="
   show GreaterEq = ">="
-  show Greater = ">"
+  show Greater   = ">"
 
-data UMLState = UMLState deriving Show
+data UMLState = UMLState deriving (Eq,Ord,Show,D.Data)
 
-instance Category () ()
+instance Category Sign ()
 
 instance Monoid BASIC_SPEC where
 
 instance Pretty BASIC_SPEC where
 instance GetRange BASIC_SPEC where
+
+instance GetRange SEN_ITEMS where
 
 instance Language UMLState where
 
@@ -138,9 +148,16 @@ namedSpec bi fooTODO = do
 -- basicSpec :: [t0] -> PrefixMap -> GenParser Char st BASIC_SPEC
 basicSpec bi _ = Basic <$> basicItems `sepBy` semiT
 
+evtItems :: Parsec [Char] st EVENT_ITEMS
 evtItems = EvtIs <$> (evtS *> evts)
+
+evtS :: Parsec [Char] st Token
 evtS = try $ pluralKeyword "event"
+
+evts :: Parsec [Char] st [EVENT_ITEM]
 evts = many evtItem
+
+evtItem :: Parsec [Char] st EVENT_ITEM
 evtItem = do
   evtName <- str2Token <$> scanLetterWord << skipSmart
   maybeArgs <- optionMaybe $ do
@@ -148,33 +165,57 @@ evtItem = do
   return $ EvtI evtName $ case maybeArgs of
     Nothing -> []
     Just varNames -> varNames
-basicItems = do SigB   <$> sigItems
+
+basicItems :: Parsec [Char] st BASIC_ITEMS
+basicItems = do SigB <$> sigItems
          <|> do SenB . TransB <$> transItem
          <|> do SenB <$> (InitB  <$> stateP <*> guardP)
          <|> do EvtB <$> evtItems
          -- <|> do SenB . FinalB <$> stateP
 
+varItems :: Parsec [Char] st [Token]
 varItems = pluralKeyword "var" >> ((var << skipSmart) `sepBy` oneOf ",;")
+
+sigItems :: Parsec [Char] st SIG_ITEMS
 sigItems = StateS <$> (statePS *> statePs)
+
+statePS :: CharParser st Token
 statePS = pluralKeyword "state"
+
+statePs :: Parsec [Char] st [STATE_ITEM]
 statePs = statePItem `sepBy` oneOf ",;"
+
+statePItem :: Parsec [Char] st STATE_ITEM
 statePItem = StateI <$> stateP << skipSmart
+
+transItem :: Parsec [Char] st TRANS_ITEM
 transItem = do s1 <- try stateP
                try $ asSeparator "-->"
                s2 <- stateP
                asSeparator ":"
                label <- transLabel
                return $ TransI s1 s2 label
+
+transLabel :: Parsec [Char] st TRANS_LABEL
 transLabel = do p <- trigger
                 g <- optionMaybe guardP
                 a <- optionMaybe actions
                 return $ Label p g a
+
+actions :: Parsec [Char] st ACTIONS
 actions = Acts <$> (asSeparator "/" >> action `sepBy` asSeparator ";")
-action = Act <$> var <*> (asSeparator ":=" >> term)
+action = Assign <$> var <*> (asSeparator ":=" >> term)
+
+trigger :: Parsec [Char] st EVENT_ITEM
 trigger = evtItem
+
+guardP :: Parsec [Char] st FORMULA
 guardP = oBracketT >> formula << cBracketT
+
+stateP :: Parsec [Char] st Token
 stateP = str2Token <$> (scanLetterWord << skipSmart)
 
+formula :: Parsec [Char] st FORMULA
 formula = buildExpressionParser ops simpForm where
   ops = [ [preWordOp "not" NotF]
         , [symOpR "/\\" (:/\)]
@@ -186,6 +227,7 @@ formula = buildExpressionParser ops simpForm where
          <|> do CompF <$> try term <*> try compOp <*> term
          <|> do oParenT >> formula << cParenT
 
+term :: Parsec [Char] st TERM
 term = buildExpressionParser ops simpTerm where
   ops = [ [symOpL "*" (:*), symOpL "/" (:/)]
         , [symOpL "+" (:+), symOpL "-" (:-)]
@@ -194,21 +236,38 @@ term = buildExpressionParser ops simpTerm where
          <|> do ConstT <$> natLit
          <|> do oParenT >> term << cParenT
     
+
+compOp :: Parsec [Char] st COMP_OP
 compOp = showChoice [Less .. Greater]
 
+
+var :: Parsec [Char] st Token
 var = str2Token <$> scanLetterWord << skipSmart
 
+
+natLit :: Parsec [Char] st Int
 natLit = value 10 <$> getNumber << skipSmart
 
+
+key :: String -> Parsec [Char] st String
 key s = keyWord (string s) << skipSmart
 
 -- parse helpers
+
+preWordOp :: String -> (a -> a) -> Operator [Char] st Data.Functor.Identity.Identity a
 preWordOp w op = Prefix (key w >> return op)
+
+symOpL :: String -> (a -> a -> a) -> Operator [Char] st Data.Functor.Identity.Identity a
 symOpL s op = Infix (asSeparator s >> return op) AssocLeft
+
+symOpR :: String -> (a -> a -> a) -> Operator [Char] st Data.Functor.Identity.Identity a
 symOpR s op = Infix (asSeparator s >> return op) AssocRight
+
+wordOp :: String -> (a -> a -> a) -> Operator [Char] st Data.Functor.Identity.Identity a
 wordOp w op = Infix (key w >> return op) AssocRight
 
 -- TODO find better name
+showChoice :: Show a => [a] -> Parsec [Char] st a
 showChoice xs = choice
   [ const x <$> try (asSeparator $ show x)
   | x <- xs
@@ -217,30 +276,72 @@ showChoice xs = choice
 -- END parsing
 
 instance ShATermConvertible BASIC_SPEC where
-instance Syntax UMLState BASIC_SPEC () () () where
+instance Syntax UMLState BASIC_SPEC Token () () where
   parsersAndPrinters UMLState = makeDefault (basicSpec [], pretty)
 
-instance Sentences UMLState () () () () where
-instance StaticAnalysis UMLState BASIC_SPEC () () () () () () () where
-instance Logic UMLState () BASIC_SPEC () () () () () () () () where
+instance Sentences UMLState SEN_ITEMS Sign () Token where
+instance StaticAnalysis UMLState BASIC_SPEC SEN_ITEMS () () Sign () Token () where
+  basic_analysis _ = Just $ \ (spec,sign,annos) -> do
+    (spec',lib) <- runStateT (ana_BASIC_SPEC spec) mempty
+    let sign   = lib2Sign lib
+        symSet = sign2SymSet sign
+        extSign = ExtSign sign symSet
+        annos  = []
+    return (spec', extSign, annos) -- TODO
 
+instance Logic UMLState () BASIC_SPEC SEN_ITEMS () () Sign () Token () () where
 
+instance Pretty SEN_ITEMS where
+instance Pretty Sign where
 
+instance ShATermConvertible SEN_ITEMS where
+instance ShATermConvertible Sign where
 
+instance ShATermConvertible Token where
 
-type Sign = Set STATE
+data Sign = Sign
+  { statesS :: Set Token
+  , varsS   :: Set Token
+  , actsS   :: Map (Token, Arity) EVENT_ITEM
+  } deriving (Eq,Show,Ord)
 type Thy = [SEN_ITEMS]
-data Library = Result
+type Arity = Int
+data Library = Library
   { statesL :: Set STATE
   , varsL   :: Set VAR_NAME
-  , actsL   :: Map (EVENT_NAME, Int) [VAR_NAME]
-  , initL   :: Maybe (STATE, GUARD)
+  , actsL   :: Map (EVENT_NAME, Arity) EVENT_ITEM
+  , initL   :: [(STATE, GUARD)]
   , transL  :: [TRANS_ITEM]
   }
+
+instance Monoid Library where
+  mempty = Library mempty mempty mempty mempty mempty
+  lib `mappend` lib' = Library { statesL = statesL lib `mappend` statesL lib'
+                               , varsL   = varsL   lib `mappend` varsL   lib'
+                               , actsL   = actsL   lib `mappend` actsL   lib'
+                               , initL   = initL   lib `mappend` initL   lib'
+                               , transL  = transL  lib `mappend` transL  lib'
+                               }
+
+lib2Sign lib = Sign
+  { statesS = statesL lib
+  , varsS   = varsL lib
+  , actsS   = actsL lib
+  }
+
+extractActs :: Map (Token, Arity) EVENT_ITEM -> Set Token
+extractActs = Set.map fst . Map.keysSet
+
+sign2SymSet :: Sign -> Set Token
+sign2SymSet sign = statesS sign `Set.union` varsS sign
+                                `Set.union` extractActs (actsS sign)
 
 type Check = StateT Library Result
 
 -- instance MonadState Library Check where
+
+errC :: String -> Check a
+errC s = lift $ fatal_error s nullRange
 
 ana_BASIC_SPEC :: BASIC_SPEC -> Check BASIC_SPEC
 ana_BASIC_SPEC (Basic bs) = Basic <$> sequence (ana_BASIC_ITEMS <$> bs)
@@ -251,44 +352,45 @@ ana_BASIC_ITEMS (SenB items) = SenB <$> ana_SEN_ITEMS items
 ana_BASIC_ITEMS (EvtB items) = EvtB <$> ana_EVENT_ITEMS items
 ana_BASIC_ITEMS (VarB items) = VarB <$> ana_VAR_ITEMS items
 
+ana_VAR_ITEMS :: VAR_ITEMS -> Check VAR_ITEMS
 ana_VAR_ITEMS (VarIs vs) = VarIs <$> sequence (ana_VAR_ITEM <$> vs)
 
+ana_VAR_ITEM :: VAR_NAME -> Check VAR_NAME
 ana_VAR_ITEM var = do
   lib <- get
   let vars = varsL lib
-  when (var `Set.member` vars) $ error ("variable declared twice: " ++ show var)
+  when (var `Set.member` vars) $ errC ("variable declared twice: " ++ show var)
   put $ lib {
     varsL = var `Set.insert` vars
   }
   return var
   
-
+ana_SIG_ITEMS :: SIG_ITEMS -> Check SIG_ITEMS
 ana_SIG_ITEMS (StateS items) = StateS <$> sequence (ana_STATE_ITEM <$> items)
 
-ana_SEN_ITEMS (TransB trans) = TransB <$> ana_TRANS_ITEMS trans
+ana_SEN_ITEMS :: SEN_ITEMS -> Check SEN_ITEMS
+ana_SEN_ITEMS (TransB tr) = TransB <$> ana_TRANS_ITEMS tr
 ana_SEN_ITEMS (InitB st g) = do
   lib <- get
   let sts = statesL lib
       lib' = lib {
-        initL = Just (st, g)
+        initL = (st,g) : initL lib
       }
   if st `elem` sts
-  then case initL lib of
-    Nothing   -> put lib' >> do return $ InitB st g
-    Just init -> error "Defined two initial transitions."
-  else error "Initial transition to undefined state."
-
+  then put lib' >> do return $ InitB st g
+  else errC "Initial transition to undefined state."
 
 ana_EVENT_ITEMS :: EVENT_ITEMS -> Check EVENT_ITEMS
 ana_EVENT_ITEMS (EvtIs as) = EvtIs <$> sequence (ana_EVENT_ITEM <$> as)
 
 ana_EVENT_ITEM :: EVENT_ITEM -> Check EVENT_ITEM
-ana_EVENT_ITEM (EvtI name vars) = do
+ana_EVENT_ITEM e@(EvtI name vars) = do
   lib <- get
-  put $ lib {actsL = Map.insert (name, length vars) vars $ actsL lib}
-  return $ EvtI name vars
+  put $ lib {actsL = Map.insert (name, length vars) e $ actsL lib}
+  return e
   
 
+ana_TRANS_ITEMS :: TRANS_ITEM -> Check TRANS_ITEM
 ana_TRANS_ITEMS (TransI st1 st2 (Label t@(EvtI tname tvars) g a)) = do
   lib <- get
   let sts = statesL lib
@@ -300,11 +402,11 @@ ana_TRANS_ITEMS (TransI st1 st2 (Label t@(EvtI tname tvars) g a)) = do
       actSkip   = Acts []
       checkWhenJust m res f = maybe (return $ Just res) f m >> return (Just res)
   when (st1 `Set.notMember` sts) $
-    error ("transition out of undefined state: " ++ show st1)
+    errC ("transition out of undefined state: " ++ show st1)
   when (st2 `Set.notMember` sts) $
-    error ("transition into undefined state: "   ++ show st2)
+    errC ("transition into undefined state: "   ++ show st2)
   when (tkey `Map.notMember` acts) $
-    error ("transition with undefined trigger: " ++ show tkey)
+    errC ("transition with undefined trigger: " ++ show tkey)
   g' <- checkWhenJust g TrueF $ \ gRaw -> do
     undefined -- TODO check FORMULA
   a' <- checkWhenJust a actSkip $ \ (Acts as) -> do
@@ -317,19 +419,22 @@ ana_TRANS_ITEMS (TransI st1 st2 (Label t@(EvtI tname tvars) g a)) = do
   put lib'
   return newTrans
 
-ana_ACTION vars varsWithTvar (Act var tm) = do
-  when (var `Set.notMember` vars) $ error ("assignment to undeclared variable")
+ana_ACTION :: Set VAR_NAME -> Set VAR_NAME -> ACTION -> Check ACTION
+ana_ACTION vars varsWithTvar (Assign var tm) = do
+  when (var `Set.notMember` vars) $ errC ("assignment to undeclared variable")
   ana_TERM varsWithTvar tm
-  return $ Act var tm
+  return $ Assign var tm
 
+ana_TERM :: Set VAR_NAME -> TERM -> Check ()
 ana_TERM vars (VarT var) = when (var `Set.notMember` vars) $
-  error ("reference to undeclared variable: " ++ show var)
+  errC ("reference to undeclared variable: " ++ show var)
 ana_TERM vars (ConstT lit) = return ()
 ana_TERM vars (a :+ b) = ana_TERM vars a >> ana_TERM vars b
 ana_TERM vars (a :- b) = ana_TERM vars a >> ana_TERM vars b
 ana_TERM vars (a :* b) = ana_TERM vars a >> ana_TERM vars b
 ana_TERM vars (a :/ b) = ana_TERM vars a >> ana_TERM vars b
   
+ana_STATE_ITEM :: STATE_ITEM -> Check STATE_ITEM
 ana_STATE_ITEM (StateI st) = do
   lib <- get
   put $ lib {
@@ -347,18 +452,74 @@ data EDHML = DtSen FORMULA
            | Not EDHML
            | Or EDHML EDHML
            | TrueE
-           deriving Show
+           deriving (Eq,Ord,Show,D.Data)
 
-state2EDHML c ((phi,e,psi,c'):is) vs bs im1 im2 es =
+lib2EDHML :: Library -> EDHML
+lib2EDHML lib = assert `seq` computeEDHML c0 is vs bs im1 im2 es
+  where
+    (c0, states) = Set.deleteFindMin $ statesL lib
+    guard2phi = maybe TrueF id
+
+    primeVars (VarT v)     = VarT $ prime v
+    primeVars x@(ConstT _) = x
+    primeVars (x :+ y)     = primeVars x :+ primeVars y
+    primeVars (x :- y)     = primeVars x :- primeVars y
+    primeVars (x :* y)     = primeVars x :* primeVars y
+    primeVars (x :/ y)     = primeVars x :/ primeVars y
+
+    acts2psi Nothing = TrueF
+    acts2psi (Just (Acts as)) = foldAndF [ CompF (VarT v) Eq (primeVars t)
+                                             | Assign v t <- as
+                                             ]
+    im1 c = Map.findWithDefault id c (
+              Map.fromListWith (.) -- for equal keys: compose diff lists
+                [ ( c
+                  , ([(guard2phi guard, e, acts2psi acts, c')] ++) -- difference list
+                  )
+                | TransI c c' (Label e guard acts) <- transL lib
+                ] 
+            ) []
+    im2 ce = Map.findWithDefault id ce (
+               Map.fromListWith (.) -- for equal keys = compose diff lists
+                 [ ( (c, ename, length evars)
+                   , ([(guard2phi guard, acts2psi acts, c')] ++) -- difference list
+                   )
+                 | TransI c c' (Label (EvtI ename evars) guard acts) <- transL lib
+                 ]
+             ) []
+    vs = Set.toList states
+    bs = c0 : vs
+    is = im1 c0
+    es = Map.elems $ actsL lib
+    assert = if Set.null (statesL lib)
+             then error "Can't translate lib to EDML: need at least one state"
+             else ()
+
+computeEDHML :: STATE
+             -> [(FORMULA, EVENT_ITEM, FORMULA, STATE)]
+             -> [STATE]
+             -> [STATE]
+             -> (STATE -> [(FORMULA, EVENT_ITEM, FORMULA, STATE)])
+             -> ( (STATE, EVENT_NAME, Int) -> [(FORMULA, FORMULA, STATE)]
+                )
+             -> [EVENT_ITEM]
+             -> EDHML
+computeEDHML c ((phi,e,psi,c'):is) vs bs im1 im2 es =
   At c $ DiaAE e phi psi (
-    St c `andE` state2EDHML c is vs bs im1 im2 es
+    St c' `andE` computeEDHML c is vs bs im1 im2 es
   )
-state2EDHML c [] (c':vs) bs im1 im2 es = state2EDHML c' (im1 c') vs bs im1 im2 es
-state2EDHML c [] []      bs im1 im2 es = fin bs im2 es `andE` pairsDiff bs
+computeEDHML c [] (c':vs) bs im1 im2 es = computeEDHML c' (im1 c') vs bs im1 im2 es
+computeEDHML c [] []      bs im1 im2 es = fin bs im2 es `andE` pairsDiff bs
 
-pairsDiff bs = foldAndE [Not $ At c1 $ St c2 | c1 <- bs, c2 <- bs]
+pairsDiff :: [Token] -> EDHML
+pairsDiff bs = foldAndE [ Not $ At c1 $ St c2 | c1 <- bs, c2 <- bs ]
 
-fin cs im2 es = foldAndE
+fin :: [STATE]
+    -> ( (STATE, EVENT_NAME, Int) -> [(FORMULA, FORMULA, STATE)]
+       )
+    -> [EVENT_ITEM]
+    -> EDHML
+fin bs im2 es = foldAndE
   [ At c $ foldAndE [ foldAndE [ DiaEE e (
                                    (
                                      foldAndF [ phi :/\ psi
@@ -372,40 +533,81 @@ fin cs im2 es = foldAndE
                                  ) $ foldOrE [ St c'
                                              | (phi, psi, c') <- ps
                                              ]
-                               | (ps, nps) <- celookup c e im2
+                               | (ps, nps) <- complements c e im2
                                ]
                     | e <- es
                     ]
-  | c <- cs
+  | c <- bs
   ]
 
-celookup c (EvtI ename evars) im2 = case Map.lookup (c, ename, length evars) im2
-                                    of Nothing -> []
-                                       Just xs -> [ ( ps
-                                                    , xs List.\\ ps
-                                                    )
-                                                  | ps <- subsequences xs -- TODO use Set
-                                                                          -- problem: powerSet reported as not exported
-                                                  ]
+          -- TODO use Set
+          -- problem: powerSet reported as not exported
+complements :: -- (Eq a, Ord t) =>
+               STATE
+            -> EVENT_ITEM
+            -> (
+                 (STATE, EVENT_NAME, Arity) -> [(FORMULA, FORMULA, STATE)]
+               )
+            -> [([(FORMULA, FORMULA, STATE)], [(FORMULA, FORMULA, STATE)])]
+complements c (EvtI ename evars) im2 =
+  let xs = im2 (c, ename, length evars)
+  in [ ( ps
+       , xs List.\\ ps
+       )
+     | ps <- subsequences xs 
+     ]
 
 
 -- CASL logic helpers
+andC :: C.FORMULA f -> C.FORMULA f -> C.FORMULA f
 a `andC` b = C.Junction C.Con [a, b] nullRange
+
+orC :: C.FORMULA f -> C.FORMULA f -> C.FORMULA f
 a `orC` b = C.Junction C.Dis [a, b] nullRange
+
+notC :: C.FORMULA f -> C.FORMULA f
 notC a = C.Negation a nullRange
-foldAndC xs = C.Junction C.Con xs nullRange
-foldOrC  xs = C.Junction C.Dis xs nullRange
+
+foldAndC :: [C.FORMULA f] -> C.FORMULA f
+foldAndC = C.conjunct
+
+foldOrC :: [C.FORMULA f] -> C.FORMULA f
+foldOrC  = C.disjunct
 
 -- state FORMULA logic helpers
-foldAndF = List.foldl (:/\) TrueF
-foldOrF  = List.foldl (:\/) FalseF
+
+foldAndF :: [FORMULA] -> FORMULA
+foldAndF []   = TrueF
+foldAndF phis = List.foldl1 (:/\) phis
+
+foldOrF :: [FORMULA] -> FORMULA
+foldOrF  []   = FalseF
+foldOrF  phis = List.foldl1 (:\/) phis
 
 -- EDHML logic helpers
+andE :: EDHML -> EDHML -> EDHML
 phi `andE` psi = Not (Not phi `Or` Not psi)
-foldAndE = List.foldl andE TrueE
-foldOrE = List.foldl Or $ Not TrueE
+
+foldAndE :: [EDHML] -> EDHML
+foldAndE [] = TrueE
+foldAndE fs = List.foldl1 andE fs
+
+foldOrE :: [EDHML] -> EDHML
+foldOrE [] = Not TrueE
+foldOrE fs = List.foldl1 Or fs
 
 -- TODO handle EDHML signatures
+
+edhmlRmNotNot :: EDHML -> EDHML
+edhmlRmNotNot (Not (Not f))       = edhmlRmNotNot f
+edhmlRmNotNot (Not f)             = Not             $ edhmlRmNotNot f
+edhmlRmNotNot (Binding c f)       = Binding c       $ edhmlRmNotNot f
+edhmlRmNotNot (At c f )           = At c            $ edhmlRmNotNot f
+edhmlRmNotNot (Box f)             = Box             $ edhmlRmNotNot f
+edhmlRmNotNot (DiaEE e phi f)     = DiaEE e phi     $ edhmlRmNotNot f
+edhmlRmNotNot (DiaAE e phi psi f) = DiaAE e phi psi $ edhmlRmNotNot f
+edhmlRmNotNot (Or f f')           = edhmlRmNotNot f `Or` edhmlRmNotNot f'
+edhmlRmNotNot f                   = f
 
 edhml2CASL :: EDHML -> VAR_NAME -> C.FORMULA f
 edhml2CASL (DtSen f) g = stForm2CASL g (prime g) f
@@ -440,6 +642,7 @@ edhml2CASL (DiaAE e@(EvtI _ evars) phi psi f) g =
      )
 edhml2CASL (Not f)   g = notC $ edhml2CASL f g
 edhml2CASL (Or f f') g = edhml2CASL f g `orC` edhml2CASL f' g
+edhml2CASL TrueE     g = C.trueForm
 
 
 stForm2CASL :: Token -> Token -> FORMULA -> C.FORMULA f
@@ -459,15 +662,17 @@ stForm2CASL g g' (f :<=> f')  = stForm2CASL g g' f `C.mkEqv`  stForm2CASL g g' f
 
 term2CASLterm g g' (VarT var)      = attr2CASLterm g g' var
 term2CASLterm g g' (ConstT natLit) = C.Mixfix_token $ str2Token $ show natLit
-term2CASLterm g g' (x:+y)          = translOp "+" x y g g'
-term2CASLterm g g' (x:-y)          = translOp "-" x y g g'
-term2CASLterm g g' (x:*y)          = translOp "*" x y g g'
-term2CASLterm g g' (x:/y)          = translOp "/" x y g g'
+term2CASLterm g g' (x:+y)          = translOp g g' "+" x y
+term2CASLterm g g' (x:-y)          = translOp g g' "-" x y
+term2CASLterm g g' (x:*y)          = translOp g g' "*" x y
+term2CASLterm g g' (x:/y)          = translOp g g' "/" x y
 
-translOp opName x y g g' = C.mkAppl (C.Op_name $ str2Id opName)
+translOp :: Token -> Token -> String -> TERM -> TERM -> C.TERM f
+translOp g g' opName x y = C.mkAppl (C.Op_name $ str2Id opName)
                                     (term2CASLterm g g' <$> [x,y])
 
 -- TODO: consider bound variables as opposed to attributes
+attr2CASLterm :: Token -> Token -> Token -> C.TERM f
 attr2CASLterm g g' (Token varName _) =
   if primed varName
   then C.mkAppl (C.Op_name $ token2Id g')
@@ -475,37 +680,69 @@ attr2CASLterm g g' (Token varName _) =
   else C.mkAppl (C.Op_name $ token2Id g )
                 [C.Qual_var (str2Token           varName) confSort nullRange]
 
+primed :: String -> Bool
 primed = (=='\'') . last
 
 -- | assumes primed
+unprime :: [a] -> [a]
 unprime = reverse . drop 1 . reverse
 
+eventItem2CASLterm :: EVENT_ITEM -> C.TERM f
 eventItem2CASLterm (EvtI (Token name _) vars) =
   C.mkAppl (C.Op_name $ str2Id name)
            (flip C.mkVarTerm natSort <$> vars)
 
-str2Id         = token2Id . str2Token
+str2Id :: String -> Id
+str2Id = token2Id . str2Token
+
+token2Id :: Token -> Id
 token2Id tok   = Id [tok] [] nullRange
+
+str2Token :: String -> Token
 str2Token name = Token name nullRange
 
+exEvtArgs :: [C.VAR] -> C.FORMULA f -> C.FORMULA f
 exEvtArgs   evars phi = C.mkExist  [C.Var_decl evars natSort nullRange] phi
+
+univEvtArgs :: [C.VAR] -> C.FORMULA f -> C.FORMULA f
 univEvtArgs evars phi = C.mkForall [C.Var_decl evars natSort nullRange] phi
+
+exCtrl :: C.VAR -> C.FORMULA f -> C.FORMULA f
 exCtrl s f = C.mkExist [C.mkVarDecl s ctrlSort] f
+
+exConf :: C.VAR -> C.FORMULA f -> C.FORMULA f
 exConf   g f = C.mkExist  [C.mkVarDecl g confSort] f
+
+univConf :: C.VAR -> C.FORMULA f -> C.FORMULA f
 univConf g f = C.mkForall [C.mkVarDecl g confSort] f
+
+prime :: Token -> Token
 prime (Token var _) = str2Token (var++"'")
+
+trans :: C.VAR -> EVENT_ITEM -> C.VAR -> C.FORMULA f
 trans g e g' = C.mkPredication transPred [ confVar g
                                          , eventItem2CASLterm e
                                          , confVar g'
                                          ]
-confVar g   = C.mkVarTerm g confSort
-ctrl s      = C.mkAppl (C.Op_name ctrlOp) [C.mkVarTerm s ctrlSort]
-reach2 g    = C.mkPredication reach2Pred [confVar g]
+
+confVar :: C.VAR -> C.TERM f
+confVar g = C.mkVarTerm g confSort
+
+ctrl :: C.VAR -> C.TERM f
+ctrl s = C.Op_name ctrlOp `C.mkAppl` [C.mkVarTerm s ctrlSort]
+
+reach2 :: C.VAR -> C.FORMULA f
+reach2 g = C.mkPredication reach2Pred [confVar g]
+
+reach3 :: C.VAR -> C.VAR -> C.FORMULA f
 reach3 g g' = C.mkPredication reach3Pred (confVar <$> [g,g'])
 
+transPred, reach2Pred, reach3Pred :: C.PRED_SYMB
 transPred  = C.Pred_name $ str2Id "trans"
 reach2Pred = C.Pred_name $ str2Id "reachable2"
 reach3Pred = C.Pred_name $ str2Id "reachable3"
+
+ctrlOp, ctrlSort, evtSort, natSort, confSort :: Id
 ctrlOp   = str2Id "ctrl"
 ctrlSort = str2Id "Ctrl"
 evtSort  = str2Id "Evt"

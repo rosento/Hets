@@ -3,6 +3,10 @@ module Comorphisms.UMLState2CASL where
 
 import Common.Id
 import Common.ProofTree
+import Common.AS_Annotation (makeNamed)
+import Common.Lib.State
+
+import Data.Set
 
 import Logic.Logic
 import Logic.Comorphism
@@ -35,9 +39,24 @@ instance Language UMLState2CASL where
   description   UMLState2CASL = "TODO"
 
 instance Comorphism UMLState2CASL
-  UMLState ()   BASIC_SPEC SEN_ITEMS ()    ()       Sign  ()   Token ()      ()
-  CL.CASL  CSub CBasic     CForm     CSyms CSymMaps CSign CMor CSym  CRawSym CProof
+  UMLState ()   BASIC_SPEC EDHML ()    ()       Library  Morphism Token ()      ()
+  CL.CASL  CSub CBasic     CForm CSyms CSymMaps CSign    CMor     CSym  CRawSym CProof
   where
     sourceLogic UMLState2CASL = UMLState
     sourceSublogic UMLState2CASL = ()
-    map_theory UMLState2CASL (sign, sens) = undefined
+    targetLogic UMLState2CASL = CL.CASL
+    mapSublogic UMLState2CASL () = Just top
+    map_theory UMLState2CASL (sign, _) = do
+      let
+          computeSign = do
+            -- CS.addSort CA.NonEmptySorts natSort 
+            -- CS.addSort CA.NonEmptySorts evtSort
+            -- CS.addSort CA.NonEmptySorts ctrlSort
+            return undefined
+          csign = execState computeSign (CS.emptySign ())
+          g = str2Token "g"
+          machine = CA.mkForall [CA.mkVarDecl g confSort]
+                                (edhml2CASL (lib2EDHML sign) (str2Token "g"))
+      return (csign, [makeNamed "machine" machine])
+    map_sentence UMLState2CASL sen = undefined
+    map_symbol UMLState2CASL lib tok = singleton $ CS.Symbol (token2Id tok) undefined

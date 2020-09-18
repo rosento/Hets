@@ -122,14 +122,24 @@ instance Show COMP_OP where
 
 data UMLState = UMLState deriving (Eq,Ord,Show,D.Data)
 
-instance Category Sign ()
+type Morphism = Library -- only identity morphisms
+
+instance Category Library Morphism where
+  ide sig = sig
+  inverse f = return f
+  composeMorphisms f g = return f
+  dom f = f
+  cod f = f
+  isInclusion f = True
+  legal_mor f = return ()
+  
 
 instance Monoid BASIC_SPEC where
 
 instance Pretty BASIC_SPEC where
 instance GetRange BASIC_SPEC where
 
-instance GetRange SEN_ITEMS where
+instance GetRange EDHML where
 
 instance Language UMLState where
 
@@ -146,22 +156,25 @@ namedSpec bi fooTODO = do
   return $ name := contents
 
 -- basicSpec :: [t0] -> PrefixMap -> GenParser Char st BASIC_SPEC
-basicSpec bi _ = Basic <$> basicItems `sepBy` semiT
+basicSpec bi _ = Basic <$> try basicItems `sepBy` semiT << theEnd
+
+theEnd :: Parsec [Char] st [Char]
+theEnd = optionMaybe (asSeparator ";") >> key "end"
 
 evtItems :: Parsec [Char] st EVENT_ITEMS
-evtItems = EvtIs <$> (evtS *> evts)
+evtItems = EvtIs <$> (evtS *> evts) <?> "event items"
 
 evtS :: Parsec [Char] st Token
-evtS = try $ pluralKeyword "event"
+evtS = try $ pluralKeyword "event" << skipSmart
 
 evts :: Parsec [Char] st [EVENT_ITEM]
-evts = many evtItem
+evts = try evtItem `sepBy` asSeparator ","
 
 evtItem :: Parsec [Char] st EVENT_ITEM
 evtItem = do
   evtName <- str2Token <$> scanLetterWord << skipSmart
   maybeArgs <- optionMaybe $ do
-    oParenT >> (var << skipSmart) `sepBy` oneOf "," << cParenT
+    oParenT >> (var << skipSmart) `sepBy` asSeparator "," << cParenT
   return $ EvtI evtName $ case maybeArgs of
     Nothing -> []
     Just varNames -> varNames
@@ -169,27 +182,29 @@ evtItem = do
 basicItems :: Parsec [Char] st BASIC_ITEMS
 basicItems = do SigB <$> sigItems
          <|> do SenB . TransB <$> transItem
-         <|> do SenB <$> (InitB  <$> stateP <*> guardP)
+         <|> do SenB <$> (key "init" >> (InitB  <$> (stateP  << asSeparator ":") <*> guardP))
          <|> do EvtB <$> evtItems
+         <|> do VarB <$> varItems
          -- <|> do SenB . FinalB <$> stateP
 
-varItems :: Parsec [Char] st [Token]
-varItems = pluralKeyword "var" >> ((var << skipSmart) `sepBy` oneOf ",;")
+varItems :: Parsec [Char] st VAR_ITEMS
+varItems = VarIs <$> (pluralKeyword "var" >> ((var << skipSmart) `sepBy` asSeparator ","))
 
 sigItems :: Parsec [Char] st SIG_ITEMS
 sigItems = StateS <$> (statePS *> statePs)
 
 statePS :: CharParser st Token
-statePS = pluralKeyword "state"
+statePS = pluralKeyword "state" << skipSmart
 
 statePs :: Parsec [Char] st [STATE_ITEM]
-statePs = statePItem `sepBy` oneOf ",;"
+statePs = statePItem `sepBy` asSeparator ","
 
 statePItem :: Parsec [Char] st STATE_ITEM
 statePItem = StateI <$> stateP << skipSmart
 
 transItem :: Parsec [Char] st TRANS_ITEM
-transItem = do s1 <- try stateP
+transItem = do key "trans"
+               s1 <- try stateP
                try $ asSeparator "-->"
                s2 <- stateP
                asSeparator ":"
@@ -203,7 +218,13 @@ transLabel = do p <- trigger
                 return $ Label p g a
 
 actions :: Parsec [Char] st ACTIONS
-actions = Acts <$> (asSeparator "/" >> action `sepBy` asSeparator ";")
+actions = Acts <$> do
+  asSeparator "/"
+  asSeparator "{"
+  as <- action `sepBy` asSeparator ";"
+  asSeparator "}"
+  return as
+
 action = Assign <$> var <*> (asSeparator ":=" >> term)
 
 trigger :: Parsec [Char] st EVENT_ITEM
@@ -238,10 +259,10 @@ term = buildExpressionParser ops simpTerm where
     
 
 compOp :: Parsec [Char] st COMP_OP
-compOp = showChoice [Less .. Greater]
+compOp = parseAlts [Less .. Greater]
 
 
-var :: Parsec [Char] st Token
+var :: Parsec [Char] st VAR_NAME
 var = str2Token <$> scanLetterWord << skipSmart
 
 
@@ -250,7 +271,7 @@ natLit = value 10 <$> getNumber << skipSmart
 
 
 key :: String -> Parsec [Char] st String
-key s = keyWord (string s) << skipSmart
+key s = try (keyWord (string s) << skipSmart)
 
 -- parse helpers
 
@@ -267,8 +288,8 @@ wordOp :: String -> (a -> a -> a) -> Operator [Char] st Data.Functor.Identity.Id
 wordOp w op = Infix (key w >> return op) AssocRight
 
 -- TODO find better name
-showChoice :: Show a => [a] -> Parsec [Char] st a
-showChoice xs = choice
+parseAlts :: Show a => [a] -> Parsec [Char] st a
+parseAlts xs = choice
   [ const x <$> try (asSeparator $ show x)
   | x <- xs
   ]
@@ -279,23 +300,23 @@ instance ShATermConvertible BASIC_SPEC where
 instance Syntax UMLState BASIC_SPEC Token () () where
   parsersAndPrinters UMLState = makeDefault (basicSpec [], pretty)
 
-instance Sentences UMLState SEN_ITEMS Sign () Token where
-instance StaticAnalysis UMLState BASIC_SPEC SEN_ITEMS () () Sign () Token () where
+instance Sentences UMLState EDHML Library Morphism Token where
+instance StaticAnalysis UMLState BASIC_SPEC EDHML () () Library Morphism Token () where
   basic_analysis _ = Just $ \ (spec,sign,annos) -> do
     (spec',lib) <- runStateT (ana_BASIC_SPEC spec) mempty
-    let sign   = lib2Sign lib
-        symSet = sign2SymSet sign
+    let sign   = lib
+        symSet = sign2SymSet $ lib2Sign lib
         extSign = ExtSign sign symSet
         annos  = []
     return (spec', extSign, annos) -- TODO
 
-instance Logic UMLState () BASIC_SPEC SEN_ITEMS () () Sign () Token () () where
+instance Logic UMLState () BASIC_SPEC EDHML () () Library Morphism Token () () where
 
-instance Pretty SEN_ITEMS where
-instance Pretty Sign where
+instance Pretty EDHML where
+instance Pretty Library where
 
-instance ShATermConvertible SEN_ITEMS where
-instance ShATermConvertible Sign where
+instance ShATermConvertible EDHML where
+instance ShATermConvertible Library where
 
 instance ShATermConvertible Token where
 
@@ -304,7 +325,7 @@ data Sign = Sign
   , varsS   :: Set Token
   , actsS   :: Map (Token, Arity) EVENT_ITEM
   } deriving (Eq,Show,Ord)
-type Thy = [SEN_ITEMS]
+type Thy = [EDHML]
 type Arity = Int
 data Library = Library
   { statesL :: Set STATE
@@ -312,7 +333,7 @@ data Library = Library
   , actsL   :: Map (EVENT_NAME, Arity) EVENT_ITEM
   , initL   :: [(STATE, GUARD)]
   , transL  :: [TRANS_ITEM]
-  }
+  } deriving (Eq,Ord,Show)
 
 instance Monoid Library where
   mempty = Library mempty mempty mempty mempty mempty
@@ -408,7 +429,7 @@ ana_TRANS_ITEMS (TransI st1 st2 (Label t@(EvtI tname tvars) g a)) = do
   when (tkey `Map.notMember` acts) $
     errC ("transition with undefined trigger: " ++ show tkey)
   g' <- checkWhenJust g TrueF $ \ gRaw -> do
-    undefined -- TODO check FORMULA
+    return g -- TODO check FORMULA
   a' <- checkWhenJust a actSkip $ \ (Acts as) -> do
     Just . Acts <$> sequence (ana_ACTION (varsL lib) varsWithTvar <$> as)
   let l' = Label t g' a'
@@ -455,7 +476,7 @@ data EDHML = DtSen FORMULA
            deriving (Eq,Ord,Show,D.Data)
 
 lib2EDHML :: Library -> EDHML
-lib2EDHML lib = assert `seq` computeEDHML c0 is vs bs im1 im2 es
+lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML c0 is vs bs im1 im2 es)
   where
     (c0, states) = Set.deleteFindMin $ statesL lib
     guard2phi = maybe TrueF id
@@ -506,8 +527,8 @@ computeEDHML :: STATE
              -> EDHML
 computeEDHML c ((phi,e,psi,c'):is) vs bs im1 im2 es =
   At c $ DiaAE e phi psi (
-    St c' `andE` computeEDHML c is vs bs im1 im2 es
-  )
+    St c'
+  ) `andE` computeEDHML c is vs bs im1 im2 es
 computeEDHML c [] (c':vs) bs im1 im2 es = computeEDHML c' (im1 c') vs bs im1 im2 es
 computeEDHML c [] []      bs im1 im2 es = fin bs im2 es `andE` pairsDiff bs
 
@@ -560,10 +581,10 @@ complements c (EvtI ename evars) im2 =
 
 -- CASL logic helpers
 andC :: C.FORMULA f -> C.FORMULA f -> C.FORMULA f
-a `andC` b = C.Junction C.Con [a, b] nullRange
+a `andC` b = C.conjunct [a, b]
 
 orC :: C.FORMULA f -> C.FORMULA f -> C.FORMULA f
-a `orC` b = C.Junction C.Dis [a, b] nullRange
+a `orC` b = C.disjunct [a, b]
 
 notC :: C.FORMULA f -> C.FORMULA f
 notC a = C.Negation a nullRange
@@ -611,23 +632,25 @@ edhmlRmNotNot f                   = f
 
 edhml2CASL :: EDHML -> VAR_NAME -> C.FORMULA f
 edhml2CASL (DtSen f) g = stForm2CASL g (prime g) f
-edhml2CASL (St s) g = C.Mixfix_token s `C.mkStEq` ctrl g
+edhml2CASL (St s) g = mkState s `C.mkStEq` ctrl g -- TODO states bound or as ops?
 edhml2CASL (Binding s f) g = exCtrl s (
-                                      C.Mixfix_token s `C.mkStEq` ctrl g
+                                      mkState s `C.mkStEq` ctrl g
                                `andC` edhml2CASL f g -- TODO check index "S union {s}"
                              )
 edhml2CASL (At s f) g =
-  univConf (prime g) (
-               (
-                        (ctrl (prime g) `C.mkStEq` C.Mixfix_token s)
-                 `andC` reach2 {- TODO F? -} (prime g)
-               )
-    `C.mkImpl` edhml2CASL f (prime g)
-  )
+  let g' = prime g
+  in univConf g' (
+                  (
+                           (ctrl g' `C.mkStEq` mkState s)
+                    `andC` reach2 {- TODO F? -} g'
+                  )
+       `C.mkImpl` edhml2CASL f g'
+     )
 edhml2CASL (Box f) g =
-  univConf (prime g) (
-    reach3 {- F? -} g (prime g) `C.mkImpl` edhml2CASL f (prime g)
-  )
+  let g' = prime g
+  in univConf g' (
+       reach3 {- F? -} g g' `C.mkImpl` edhml2CASL f g'
+     )
 edhml2CASL (DiaEE e@(EvtI _ evars) phi f) g =
   let g' = prime g
   in exEvtArgs evars $ exConf g' (
@@ -668,28 +691,31 @@ term2CASLterm g g' (x:*y)          = translOp g g' "*" x y
 term2CASLterm g g' (x:/y)          = translOp g g' "/" x y
 
 translOp :: Token -> Token -> String -> TERM -> TERM -> C.TERM f
-translOp g g' opName x y = C.mkAppl (C.Op_name $ str2Id opName)
+translOp g g' opName x y = C.mkAppl (op (str2Token opName) [natSort,natSort] natSort)
                                     (term2CASLterm g g' <$> [x,y])
 
 -- TODO: consider bound variables as opposed to attributes
 attr2CASLterm :: Token -> Token -> Token -> C.TERM f
-attr2CASLterm g g' (Token varName _) =
+attr2CASLterm g g' var@(Token varName _) =
   if primed varName
-  then C.mkAppl (C.Op_name $ token2Id g')
-                [C.Qual_var (str2Token $ unprime varName) confSort nullRange]
-  else C.mkAppl (C.Op_name $ token2Id g )
-                [C.Qual_var (str2Token           varName) confSort nullRange]
+  then C.mkAppl (op (str2Token $ unprime varName) [confSort] natSort)
+                [C.Qual_var g' confSort nullRange]
+  else C.mkAppl (op var [confSort] natSort)
+                [C.Qual_var g confSort nullRange]
 
 primed :: String -> Bool
 primed = (=='\'') . last
 
 -- | assumes primed
-unprime :: [a] -> [a]
+unprime :: String -> String
 unprime = reverse . drop 1 . reverse
 
 eventItem2CASLterm :: EVENT_ITEM -> C.TERM f
 eventItem2CASLterm (EvtI (Token name _) vars) =
-  C.mkAppl (C.Op_name $ str2Id name)
+  C.mkAppl ( op (str2Token ("evt_" ++ name))
+                (const natSort <$> vars)
+                evtSort
+           )
            (flip C.mkVarTerm natSort <$> vars)
 
 str2Id :: String -> Id
@@ -702,9 +728,11 @@ str2Token :: String -> Token
 str2Token name = Token name nullRange
 
 exEvtArgs :: [C.VAR] -> C.FORMULA f -> C.FORMULA f
+exEvtArgs   []    phi = phi
 exEvtArgs   evars phi = C.mkExist  [C.Var_decl evars natSort nullRange] phi
 
 univEvtArgs :: [C.VAR] -> C.FORMULA f -> C.FORMULA f
+univEvtArgs []    phi = phi
 univEvtArgs evars phi = C.mkForall [C.Var_decl evars natSort nullRange] phi
 
 exCtrl :: C.VAR -> C.FORMULA f -> C.FORMULA f
@@ -719,6 +747,16 @@ univConf g f = C.mkForall [C.mkVarDecl g confSort] f
 prime :: Token -> Token
 prime (Token var _) = str2Token (var++"'")
 
+op :: Token -> [C.SORT] -> C.SORT -> C.OP_SYMB
+op name argTys resTy = C.mkQualOp (token2Id name)
+                                  (C.Op_type C.Total argTys resTy nullRange)
+
+mkState name = op name [] ctrlSort `C.mkAppl` []
+
+mkVar :: C.VAR -> C.SORT -> C.TERM f
+mkVar name sort = C.toQualVar $ C.mkVarDecl name sort
+
+
 trans :: C.VAR -> EVENT_ITEM -> C.VAR -> C.FORMULA f
 trans g e g' = C.mkPredication transPred [ confVar g
                                          , eventItem2CASLterm e
@@ -729,7 +767,7 @@ confVar :: C.VAR -> C.TERM f
 confVar g = C.mkVarTerm g confSort
 
 ctrl :: C.VAR -> C.TERM f
-ctrl s = C.Op_name ctrlOp `C.mkAppl` [C.mkVarTerm s ctrlSort]
+ctrl g = ctrlOp `C.mkAppl` [confVar g]
 
 reach2 :: C.VAR -> C.FORMULA f
 reach2 g = C.mkPredication reach2Pred [confVar g]
@@ -738,12 +776,17 @@ reach3 :: C.VAR -> C.VAR -> C.FORMULA f
 reach3 g g' = C.mkPredication reach3Pred (confVar <$> [g,g'])
 
 transPred, reach2Pred, reach3Pred :: C.PRED_SYMB
-transPred  = C.Pred_name $ str2Id "trans"
-reach2Pred = C.Pred_name $ str2Id "reachable2"
-reach3Pred = C.Pred_name $ str2Id "reachable3"
+transPred  = C.mkQualPred (str2Id "trans")
+                          (C.Pred_type [confSort,evtSort,confSort] nullRange)
+reach2Pred = C.mkQualPred (str2Id "reachable2")
+                          (C.Pred_type [confSort] nullRange)
+reach3Pred = C.mkQualPred (str2Id "reachable3")
+                          (C.Pred_type [confSort,confSort] nullRange)
 
-ctrlOp, ctrlSort, evtSort, natSort, confSort :: Id
-ctrlOp   = str2Id "ctrl"
+ctrlOp :: C.OP_SYMB
+ctrlOp   = op (str2Token "ctrl") [confSort] ctrlSort
+
+ctrlSort, evtSort, natSort, confSort :: C.SORT
 ctrlSort = str2Id "Ctrl"
 evtSort  = str2Id "Evt"
 natSort  = str2Id "Nat"

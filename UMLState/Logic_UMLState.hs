@@ -412,22 +412,22 @@ ana_EVENT_ITEM e@(EvtI name vars) = do
   
 
 ana_TRANS_ITEMS :: TRANS_ITEM -> Check TRANS_ITEM
-ana_TRANS_ITEMS (TransI st1 st2 (Label t@(EvtI tname tvars) g a)) = do
+ana_TRANS_ITEMS (TransI st1 st2 (Label t@(EvtI ename evar) g a)) = do
   lib <- get
   let sts = statesL lib
       acts = actsL lib
-      tkey = (tname, length tvars)
+      ekey = (ename, length evar)
       insertVars [] set = set
       insertVars (v:vs) set = insertVars vs (v `Set.insert` set) -- TODO check duplicates
-      varsWithTvar = insertVars tvars $ attrL lib
+      varsWithTvar = insertVars evar $ attrL lib
       actSkip   = Acts []
       checkWhenJust m res f = maybe (return $ Just res) f m
   when (st1 `Set.notMember` sts) $
     errC ("transition out of undefined state: " ++ show st1)
   when (st2 `Set.notMember` sts) $
     errC ("transition into undefined state: "   ++ show st2)
-  when (tkey `Map.notMember` acts) $
-    errC ("transition with undefined trigger: " ++ show tkey)
+  when (ekey `Map.notMember` acts) $
+    errC ("transition with undefined trigger: " ++ show ekey)
   g' <- checkWhenJust g TrueF $ \ gRaw -> do
     return g -- TODO check FORMULA
   a' <- checkWhenJust a actSkip $ \ (Acts as) -> do
@@ -484,9 +484,10 @@ initCASL lib = C.mkForall [C.mkVarDecl gTok confSort]  equiv
     equiv = initP gTerm `C.mkEqv` defForm
     gTok  = str2Token "g"
     gTerm = confVar gTok
-    defForm = foldOrC [ (ctrl gTerm `C.mkStEq` mkState s0) `andC` stForm2CASL gTok gTok phi0
-                      | (s0,phi0) <- initL lib
-                      ]
+    vars  = (attrL lib, gTok, prime gTok)
+    defForm = disjunctC [ (ctrl gTerm `C.mkStEq` mkState s0) `andC` stForm2CASL vars phi0
+                        | (s0,phi0) <- initL lib
+                        ]
       
       
 
@@ -496,17 +497,10 @@ lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML c0 is vs bs im1 im2 es)
     (c0, states) = Set.deleteFindMin $ statesL lib
     guard2phi = maybe TrueF id
 
-    primeVars (VarT v)     = VarT $ prime v
-    primeVars x@(ConstT _) = x
-    primeVars (x :+ y)     = primeVars x :+ primeVars y
-    primeVars (x :- y)     = primeVars x :- primeVars y
-    primeVars (x :* y)     = primeVars x :* primeVars y
-    primeVars (x :/ y)     = primeVars x :/ primeVars y
-
     acts2psi Nothing = TrueF
-    acts2psi (Just (Acts as)) = foldAndF [ CompF (VarT $ prime v) Eq t
-                                         | Assign v t <- as
-                                         ]
+    acts2psi (Just (Acts as)) = conjunctF [ CompF (VarT $ prime v) Eq t
+                                          | Assign v t <- as
+                                          ]
     im1 c = Map.findWithDefault id c (
               Map.fromListWith (.) -- for equal keys: compose diff lists
                 [ ( c
@@ -547,33 +541,34 @@ computeEDHML c [] (c':vs) bs im1 im2 es = computeEDHML c' (im1 c') vs bs im1 im2
 computeEDHML c [] []      bs im1 im2 es = fin bs im2 es `andE` pairsDiff bs
 
 pairsDiff :: [Token] -> EDHML
-pairsDiff bs = foldAndE [ Not $ At c1 $ St c2 | c1 <- bs, c2 <- bs, c1 /= c2]
+pairsDiff bs = conjunctE [ Not $ At c1 $ St c2 | c1 <- bs, c2 <- bs, c1 /= c2]
 
-boxEE e phi f = Not $ DiaEE e phi $ Not f
+boxAA :: EVENT_ITEM -> FORMULA -> EDHML -> EDHML
+boxAA e phi f = Not $ DiaEE e phi $ Not f
 
 fin :: [STATE]
     -> ( (STATE, EVENT_NAME, Int) -> [(FORMULA, FORMULA, STATE)]
        )
     -> [EVENT_ITEM]
     -> EDHML
-fin bs im2 es = foldAndE
-  [ At c $ foldAndE [ foldAndE [ boxEE e (
-                                   (
-                                     foldAndF [ phi :/\ psi
-                                              | (phi, psi, c') <- ps
-                                              ]
-                                   ) :/\ NotF (
-                                     foldOrF  [ phi :/\ psi
-                                              | (phi, psi, c') <- nps
-                                              ]
-                                   )
-                                 ) $ foldOrE [ St c'
-                                             | (phi, psi, c') <- ps
-                                             ]
-                               | (ps, nps) <- complements c e im2
-                               ]
-                    | e <- es
-                    ]
+fin bs im2 es = conjunctE
+  [ At c $ conjunctE [ conjunctE [ boxAA e (
+                                     (
+                                       conjunctF [ phi :/\ psi
+                                                | (phi, psi, c') <- ps
+                                                ]
+                                     ) :/\ NotF (
+                                       disjunctF  [ phi :/\ psi
+                                                | (phi, psi, c') <- nps
+                                                ]
+                                     )
+                                   ) $ disjunctE [ St c'
+                                                 | (phi, psi, c') <- ps
+                                                 ]
+                                 | (ps, nps) <- complements c e im2
+                                 ]
+                      | e <- es
+                      ]
   | c <- bs
   ]
 
@@ -605,33 +600,33 @@ a `orC` b = C.disjunct [a, b]
 notC :: C.FORMULA f -> C.FORMULA f
 notC a = C.Negation a nullRange
 
-foldAndC :: [C.FORMULA f] -> C.FORMULA f
-foldAndC = C.conjunct
+conjunctC :: [C.FORMULA f] -> C.FORMULA f
+conjunctC = C.conjunct
 
-foldOrC :: [C.FORMULA f] -> C.FORMULA f
-foldOrC  = C.disjunct
+disjunctC :: [C.FORMULA f] -> C.FORMULA f
+disjunctC  = C.disjunct
 
 -- state FORMULA logic helpers
 
-foldAndF :: [FORMULA] -> FORMULA
-foldAndF []   = TrueF
-foldAndF phis = List.foldl1 (:/\) phis
+conjunctF :: [FORMULA] -> FORMULA
+conjunctF []   = TrueF
+conjunctF phis = List.foldl1 (:/\) phis
 
-foldOrF :: [FORMULA] -> FORMULA
-foldOrF  []   = FalseF
-foldOrF  phis = List.foldl1 (:\/) phis
+disjunctF :: [FORMULA] -> FORMULA
+disjunctF  []   = FalseF
+disjunctF  phis = List.foldl1 (:\/) phis
 
 -- EDHML logic helpers
 andE :: EDHML -> EDHML -> EDHML
 phi `andE` psi = Not (Not phi `Or` Not psi)
 
-foldAndE :: [EDHML] -> EDHML
-foldAndE [] = TrueE
-foldAndE fs = List.foldl1 andE fs
+conjunctE :: [EDHML] -> EDHML
+conjunctE [] = TrueE
+conjunctE fs = List.foldl1 andE fs
 
-foldOrE :: [EDHML] -> EDHML
-foldOrE [] = Not TrueE
-foldOrE fs = List.foldl1 Or fs
+disjunctE :: [EDHML] -> EDHML
+disjunctE [] = Not TrueE
+disjunctE fs = List.foldl1 Or fs
 
 -- TODO handle EDHML signatures
 
@@ -639,74 +634,75 @@ edhmlRmNotNot :: EDHML -> EDHML
 edhmlRmNotNot (Not (Not f))       = edhmlRmNotNot f
 edhmlRmNotNot (Not f)             = Not             $ edhmlRmNotNot f
 edhmlRmNotNot (Binding c f)       = Binding c       $ edhmlRmNotNot f
-edhmlRmNotNot (At c f )           = At c            $ edhmlRmNotNot f
+edhmlRmNotNot (At c f)            = At c            $ edhmlRmNotNot f
 edhmlRmNotNot (Box f)             = Box             $ edhmlRmNotNot f
 edhmlRmNotNot (DiaEE e phi f)     = DiaEE e phi     $ edhmlRmNotNot f
 edhmlRmNotNot (DiaAE e phi psi f) = DiaAE e phi psi $ edhmlRmNotNot f
 edhmlRmNotNot (Or f f')           = edhmlRmNotNot f `Or` edhmlRmNotNot f'
 edhmlRmNotNot f                   = f
 
-edhml2CASL :: EDHML -> VAR_NAME -> C.FORMULA f
-edhml2CASL (DtSen f) g = stForm2CASL g (prime g) f
-edhml2CASL (St s) g = mkState s `C.mkStEq` ctrl (confVar g) -- TODO states bound or as ops?
-edhml2CASL (Binding s f) g = exCtrl s (
-                                      mkState s `C.mkStEq` ctrl (confVar g)
-                               `andC` edhml2CASL f g -- TODO check index "S union {s}"
-                             )
-edhml2CASL (At s f) g =
-  let g' = prime g
+edhml2CASL :: Vars -> EDHML -> C.FORMULA f
+edhml2CASL vars (DtSen f) = stForm2CASL vars f
+edhml2CASL (_,g,_) (St s) = mkState s `C.mkStEq` ctrl (confVar g) -- TODO states bound or as ops?
+edhml2CASL vars@(_,g,_) (Binding s f) = exCtrl s (
+                                                 mkState s `C.mkStEq` ctrl (confVar g)
+                                          `andC` edhml2CASL vars f -- TODO check index "S union {s}"
+                                        )
+edhml2CASL vars@(as,g,g') (At s f) =
+  let newVars = (as,g',prime g')
   in univConf g' (
-                  (
-                           (ctrl (confVar g') `C.mkStEq` mkState s)
-                    `andC` reach2 {- TODO F? -} g'
-                  )
-       `C.mkImpl` edhml2CASL f g'
+       (
+                (ctrl (confVar g') `C.mkStEq` mkState s)
+         `andC` reach2 {- TODO F? -} g'
+       ) `C.mkImpl` edhml2CASL newVars f
      )
-edhml2CASL (Box f) g =
-  let g' = prime g
+edhml2CASL (as,g,g') (Box f) =
+  let newVars = (as,g',prime g')
   in univConf g' (
-       reach3 {- F? -} g g' `C.mkImpl` edhml2CASL f g'
+       reach3 g {- F? -} g' `C.mkImpl` edhml2CASL newVars f
      )
-edhml2CASL (DiaEE e@(EvtI _ evars) phi f) g =
-  let g' = prime g
+edhml2CASL vars@(as,g,g') (DiaEE e@(EvtI _ evars) phi f) =
+  let newVars = (as,g',prime g')
   in exEvtArgs evars $ exConf g' (
-       trans g e g' `andC` stForm2CASL g g' phi `andC` edhml2CASL f g'
+       trans g e g' `andC` stForm2CASL vars phi `andC` edhml2CASL newVars f
      )
-edhml2CASL (DiaAE e@(EvtI _ evars) phi psi f) g =
-  let g' = prime g
+edhml2CASL vars@(as,g,g') (DiaAE e@(EvtI _ evars) phi psi f) =
+  let newVars = (as,g',prime g')
   in univEvtArgs evars $ (
-       stForm2CASL g g' phi `C.mkImpl` exConf g' (
-         trans g e g' `andC` stForm2CASL g g' psi `andC` edhml2CASL f g'
+       stForm2CASL vars phi `C.mkImpl` exConf g' (
+         trans g e g' `andC` stForm2CASL vars psi `andC` edhml2CASL newVars f
        )
      )
-edhml2CASL (Not f)   g = notC $ edhml2CASL f g
-edhml2CASL (Or f f') g = edhml2CASL f g `orC` edhml2CASL f' g
-edhml2CASL TrueE     g = C.trueForm
+edhml2CASL vars (Not f)     = notC $ edhml2CASL vars f
+edhml2CASL vars (f `Or` f') = edhml2CASL vars f `orC` edhml2CASL vars f'
+edhml2CASL vars TrueE       = C.trueForm
 
 compOp2CASL :: COMP_OP -> C.PRED_SYMB
 compOp2CASL op = C.mkQualPred (str2Id ("__" ++ show op ++ "__"))
                               (C.Pred_type [natSort,natSort] nullRange)
 
-stForm2CASL :: Token -> Token -> FORMULA -> C.FORMULA f
-stForm2CASL g g' (CompF x op y) =
-  compOp2CASL op `C.mkPredication` [ term2CASLterm g g' x
-                                   , term2CASLterm g g' y
-                                   ]
-stForm2CASL g g' TrueF        = C.trueForm
-stForm2CASL g g' FalseF       = C.falseForm
-stForm2CASL g g' (NotF f)     = notC $ stForm2CASL g g' f
-stForm2CASL g g' (f :/\ f')   = stForm2CASL g g' f `andC`     stForm2CASL g g' f'
-stForm2CASL g g' (f :\/ f')   = stForm2CASL g g' f `orC`      stForm2CASL g g' f'
-stForm2CASL g g' (f :=> f')   = stForm2CASL g g' f `C.mkImpl` stForm2CASL g g' f'
-stForm2CASL g g' (f :<= f')   = stForm2CASL g g' f'`C.mkImpl` stForm2CASL g g' f
-stForm2CASL g g' (f :<=> f')  = stForm2CASL g g' f `C.mkEqv`  stForm2CASL g g' f'
+type Vars = (Set VAR_NAME,VAR_NAME,VAR_NAME)
 
-term2CASLterm g g' (VarT var)      = attr2CASLterm g g' var
-term2CASLterm g g' (ConstT natLit) = natLit2CASL $ show natLit
-term2CASLterm g g' (x:+y)          = translOp g g' "__+__" x y
-term2CASLterm g g' (x:-y)          = translOp g g' "__-__" x y
-term2CASLterm g g' (x:*y)          = translOp g g' "__*__" x y
-term2CASLterm g g' (x:/y)          = translOp g g' "__/__" x y
+stForm2CASL :: Vars -> FORMULA -> C.FORMULA f
+stForm2CASL vars (CompF x op y) =
+  compOp2CASL op `C.mkPredication` [ term2CASLterm vars x
+                                   , term2CASLterm vars y
+                                   ]
+stForm2CASL vars TrueF        = C.trueForm
+stForm2CASL vars FalseF       = C.falseForm
+stForm2CASL vars (NotF f)     = notC $ stForm2CASL vars f
+stForm2CASL vars (f :/\ f')   = stForm2CASL vars f `andC`     stForm2CASL vars f'
+stForm2CASL vars (f :\/ f')   = stForm2CASL vars f `orC`      stForm2CASL vars f'
+stForm2CASL vars (f :=> f')   = stForm2CASL vars f `C.mkImpl` stForm2CASL vars f'
+stForm2CASL vars (f :<= f')   = stForm2CASL vars f'`C.mkImpl` stForm2CASL vars f
+stForm2CASL vars (f :<=> f')  = stForm2CASL vars f `C.mkEqv`  stForm2CASL vars f'
+
+term2CASLterm vars (VarT var)      = var2CASLterm vars var
+term2CASLterm vars (ConstT natLit) = natLit2CASL $ show natLit
+term2CASLterm vars (x:+y)          = translOp vars "__+__" x y
+term2CASLterm vars (x:-y)          = translOp vars "__-__" x y
+term2CASLterm vars (x:*y)          = translOp vars "__*__" x y
+term2CASLterm vars (x:/y)          = translOp vars "__/__" x y
 
 natLit2CASL :: String -> C.TERM f
 natLit2CASL ds = List.foldl (%%)
@@ -717,25 +713,26 @@ natLit2CASL ds = List.foldl (%%)
 d %% e = C.mkAppl (op (str2Token "__@@__") [natSort,natSort] natSort)
                   [d,e]
 
-translOp :: Token -> Token -> String -> TERM -> TERM -> C.TERM f
-translOp g g' opName x y = C.mkAppl (op (str2Token opName) [natSort,natSort] natSort)
-                                    (term2CASLterm g g' <$> [x,y])
+translOp :: Vars -> String -> TERM -> TERM -> C.TERM f
+translOp vars opName x y = C.mkAppl (op (str2Token opName) [natSort,natSort] natSort)
+                                    (term2CASLterm vars <$> [x,y])
 
 -- TODO: consider bound variables as opposed to attributes
-attr2CASLterm :: Token -> Token -> Token -> C.TERM f
-attr2CASLterm g g' var@(Token varName _) =
-  if primed varName
-  then C.mkAppl (op (str2Token $ unprime varName) [confSort] natSort)
-                [C.Qual_var g' confSort nullRange]
-  else C.mkAppl (op var [confSort] natSort)
-                [C.Qual_var g confSort nullRange]
+var2CASLterm :: Vars -> VAR_NAME -> C.TERM f
+var2CASLterm  (attrs,g,g') var = if unprime var `Set.member` attrs
+                                 then attrT
+                                 else eVarT
+  where
+    eVarT = C.mkVarTerm var natSort
+    attrT = projOp `C.mkAppl` [C.mkVarTerm env confSort]
+    projOp = op (unprime var) [confSort] natSort
+    env = if primed var then g' else g
 
-primed :: String -> Bool
-primed = (=='\'') . last
+primed :: VAR_NAME -> Bool
+primed = (=='\'') . last . token2Str
 
--- | assumes primed
-unprime :: String -> String
-unprime = reverse . drop 1 . reverse
+unprime :: VAR_NAME -> VAR_NAME
+unprime = str2Token . reverse . dropWhile (=='\'') . reverse . token2Str
 
 eventItem2CASLterm :: EVENT_ITEM -> C.TERM f
 eventItem2CASLterm (EvtI (Token name _) vars) =
@@ -750,6 +747,8 @@ str2Id = token2Id . str2Token
 
 token2Id :: Token -> Id
 token2Id tok   = Id [tok] [] nullRange
+
+token2Str (Token s _) = s
 
 str2Token :: String -> Token
 str2Token name = Token name nullRange

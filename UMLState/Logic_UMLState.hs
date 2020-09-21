@@ -329,7 +329,7 @@ type Thy = [EDHML]
 type Arity = Int
 data Library = Library
   { statesL :: Set STATE
-  , varsL   :: Set VAR_NAME
+  , attrL   :: Set VAR_NAME
   , actsL   :: Map (EVENT_NAME, Arity) EVENT_ITEM
   , initL   :: [(STATE, GUARD)]
   , transL  :: [TRANS_ITEM]
@@ -338,7 +338,7 @@ data Library = Library
 instance Monoid Library where
   mempty = Library mempty mempty mempty mempty mempty
   lib `mappend` lib' = Library { statesL = statesL lib `mappend` statesL lib'
-                               , varsL   = varsL   lib `mappend` varsL   lib'
+                               , attrL   = attrL   lib `mappend` attrL   lib'
                                , actsL   = actsL   lib `mappend` actsL   lib'
                                , initL   = initL   lib `mappend` initL   lib'
                                , transL  = transL  lib `mappend` transL  lib'
@@ -346,7 +346,7 @@ instance Monoid Library where
 
 lib2Sign lib = Sign
   { statesS = statesL lib
-  , varsS   = varsL lib
+  , varsS   = attrL lib
   , actsS   = actsL lib
   }
 
@@ -379,10 +379,10 @@ ana_VAR_ITEMS (VarIs vs) = VarIs <$> sequence (ana_VAR_ITEM <$> vs)
 ana_VAR_ITEM :: VAR_NAME -> Check VAR_NAME
 ana_VAR_ITEM var = do
   lib <- get
-  let vars = varsL lib
+  let vars = attrL lib
   when (var `Set.member` vars) $ errC ("variable declared twice: " ++ show var)
   put $ lib {
-    varsL = var `Set.insert` vars
+    attrL = var `Set.insert` vars
   }
   return var
   
@@ -419,7 +419,7 @@ ana_TRANS_ITEMS (TransI st1 st2 (Label t@(EvtI tname tvars) g a)) = do
       tkey = (tname, length tvars)
       insertVars [] set = set
       insertVars (v:vs) set = insertVars vs (v `Set.insert` set) -- TODO check duplicates
-      varsWithTvar = insertVars tvars $ varsL lib
+      varsWithTvar = insertVars tvars $ attrL lib
       actSkip   = Acts []
       checkWhenJust m res f = maybe (return $ Just res) f m >> return (Just res)
   when (st1 `Set.notMember` sts) $
@@ -431,7 +431,7 @@ ana_TRANS_ITEMS (TransI st1 st2 (Label t@(EvtI tname tvars) g a)) = do
   g' <- checkWhenJust g TrueF $ \ gRaw -> do
     return g -- TODO check FORMULA
   a' <- checkWhenJust a actSkip $ \ (Acts as) -> do
-    Just . Acts <$> sequence (ana_ACTION (varsL lib) varsWithTvar <$> as)
+    Just . Acts <$> sequence (ana_ACTION (attrL lib) varsWithTvar <$> as)
   let l' = Label t g' a'
       newTrans = TransI st1 st2 l'
       lib' = lib {
@@ -475,6 +475,21 @@ data EDHML = DtSen FORMULA
            | TrueE
            deriving (Eq,Ord,Show,D.Data)
 
+initP :: C.TERM f -> C.FORMULA f
+initP g = C.mkPredication initPred [g]
+
+initCASL :: Library -> C.FORMULA f
+initCASL lib = C.mkForall [C.mkVarDecl gTok confSort]  equiv
+  where
+    equiv = initP gTerm `C.mkEqv` defForm
+    gTok  = str2Token "g"
+    gTerm = confVar gTok
+    defForm = foldOrC [ (ctrl gTerm `C.mkStEq` mkState s0) `andC` stForm2CASL gTok gTok phi0
+                      | (s0,phi0) <- initL lib
+                      ]
+      
+      
+
 lib2EDHML :: Library -> EDHML
 lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML c0 is vs bs im1 im2 es)
   where
@@ -490,8 +505,8 @@ lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML c0 is vs bs im1 im2 es)
 
     acts2psi Nothing = TrueF
     acts2psi (Just (Acts as)) = foldAndF [ CompF (VarT v) Eq (primeVars t)
-                                             | Assign v t <- as
-                                             ]
+                                         | Assign v t <- as
+                                         ]
     im1 c = Map.findWithDefault id c (
               Map.fromListWith (.) -- for equal keys: compose diff lists
                 [ ( c
@@ -501,7 +516,7 @@ lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML c0 is vs bs im1 im2 es)
                 ] 
             ) []
     im2 ce = Map.findWithDefault id ce (
-               Map.fromListWith (.) -- for equal keys = compose diff lists
+               Map.fromListWith (.) -- for equal keys : compose diff lists
                  [ ( (c, ename, length evars)
                    , ([(guard2phi guard, acts2psi acts, c')] ++) -- difference list
                    )
@@ -513,7 +528,7 @@ lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML c0 is vs bs im1 im2 es)
     is = im1 c0
     es = Map.elems $ actsL lib
     assert = if Set.null (statesL lib)
-             then error "Can't translate lib to EDML: need at least one state"
+             then error "Can't translate lib to EDHML: need at least one state"
              else ()
 
 computeEDHML :: STATE
@@ -526,8 +541,8 @@ computeEDHML :: STATE
              -> [EVENT_ITEM]
              -> EDHML
 computeEDHML c ((phi,e,psi,c'):is) vs bs im1 im2 es =
-  At c $ DiaAE e phi psi (
-    St c'
+  At c (
+    DiaAE e phi psi $ St c'
   ) `andE` computeEDHML c is vs bs im1 im2 es
 computeEDHML c [] (c':vs) bs im1 im2 es = computeEDHML c' (im1 c') vs bs im1 im2 es
 computeEDHML c [] []      bs im1 im2 es = fin bs im2 es `andE` pairsDiff bs
@@ -632,16 +647,16 @@ edhmlRmNotNot f                   = f
 
 edhml2CASL :: EDHML -> VAR_NAME -> C.FORMULA f
 edhml2CASL (DtSen f) g = stForm2CASL g (prime g) f
-edhml2CASL (St s) g = mkState s `C.mkStEq` ctrl g -- TODO states bound or as ops?
+edhml2CASL (St s) g = mkState s `C.mkStEq` ctrl (confVar g) -- TODO states bound or as ops?
 edhml2CASL (Binding s f) g = exCtrl s (
-                                      mkState s `C.mkStEq` ctrl g
+                                      mkState s `C.mkStEq` ctrl (confVar g)
                                `andC` edhml2CASL f g -- TODO check index "S union {s}"
                              )
 edhml2CASL (At s f) g =
   let g' = prime g
   in univConf g' (
                   (
-                           (ctrl g' `C.mkStEq` mkState s)
+                           (ctrl (confVar g') `C.mkStEq` mkState s)
                     `andC` reach2 {- TODO F? -} g'
                   )
        `C.mkImpl` edhml2CASL f g'
@@ -667,13 +682,15 @@ edhml2CASL (Not f)   g = notC $ edhml2CASL f g
 edhml2CASL (Or f f') g = edhml2CASL f g `orC` edhml2CASL f' g
 edhml2CASL TrueE     g = C.trueForm
 
+compOp2CASL :: COMP_OP -> C.PRED_SYMB
+compOp2CASL op = C.mkQualPred (str2Id ("__" ++ show op ++ "__"))
+                              (C.Pred_type [natSort,natSort] nullRange)
 
 stForm2CASL :: Token -> Token -> FORMULA -> C.FORMULA f
-stForm2CASL g g' (CompF x compOp y) = C.Mixfix_formula $ C.Mixfix_term
-  [ term2CASLterm g g' x
-  , C.Mixfix_qual_pred $ C.Pred_name $ str2Id $ show compOp
-  , term2CASLterm g g' y
-  ]
+stForm2CASL g g' (CompF x op y) =
+  compOp2CASL op `C.mkPredication` [ term2CASLterm g g' x
+                                   , term2CASLterm g g' y
+                                   ]
 stForm2CASL g g' TrueF        = C.trueForm
 stForm2CASL g g' FalseF       = C.falseForm
 stForm2CASL g g' (NotF f)     = notC $ stForm2CASL g g' f
@@ -684,11 +701,20 @@ stForm2CASL g g' (f :<= f')   = stForm2CASL g g' f'`C.mkImpl` stForm2CASL g g' f
 stForm2CASL g g' (f :<=> f')  = stForm2CASL g g' f `C.mkEqv`  stForm2CASL g g' f'
 
 term2CASLterm g g' (VarT var)      = attr2CASLterm g g' var
-term2CASLterm g g' (ConstT natLit) = C.Mixfix_token $ str2Token $ show natLit
+term2CASLterm g g' (ConstT natLit) = natLit2CASL $ show natLit
 term2CASLterm g g' (x:+y)          = translOp g g' "+" x y
 term2CASLterm g g' (x:-y)          = translOp g g' "-" x y
 term2CASLterm g g' (x:*y)          = translOp g g' "*" x y
 term2CASLterm g g' (x:/y)          = translOp g g' "/" x y
+
+natLit2CASL :: String -> C.TERM f
+natLit2CASL ds = List.foldl (%%)
+                            (constTerm (str2Token "0") natSort)
+                            [constTerm (str2Token [d]) natSort | d <- ds]
+
+(%%) :: C.TERM f -> C.TERM f -> C.TERM f
+d %% e = C.mkAppl (op (str2Token "__%%__") [natSort,natSort] natSort)
+                  [d,e]
 
 translOp :: Token -> Token -> String -> TERM -> TERM -> C.TERM f
 translOp g g' opName x y = C.mkAppl (op (str2Token opName) [natSort,natSort] natSort)
@@ -751,6 +777,10 @@ op :: Token -> [C.SORT] -> C.SORT -> C.OP_SYMB
 op name argTys resTy = C.mkQualOp (token2Id name)
                                   (C.Op_type C.Total argTys resTy nullRange)
 
+constTerm :: Token -> C.SORT -> C.TERM f
+constTerm opName sort = op opName [] sort `C.mkAppl` []
+
+mkState :: Token -> C.TERM f
 mkState name = op name [] ctrlSort `C.mkAppl` []
 
 mkVar :: C.VAR -> C.SORT -> C.TERM f
@@ -766,8 +796,8 @@ trans g e g' = C.mkPredication transPred [ confVar g
 confVar :: C.VAR -> C.TERM f
 confVar g = C.mkVarTerm g confSort
 
-ctrl :: C.VAR -> C.TERM f
-ctrl g = ctrlOp `C.mkAppl` [confVar g]
+ctrl :: C.TERM f -> C.TERM f
+ctrl g = ctrlOp `C.mkAppl` [g]
 
 reach2 :: C.VAR -> C.FORMULA f
 reach2 g = C.mkPredication reach2Pred [confVar g]
@@ -775,7 +805,9 @@ reach2 g = C.mkPredication reach2Pred [confVar g]
 reach3 :: C.VAR -> C.VAR -> C.FORMULA f
 reach3 g g' = C.mkPredication reach3Pred (confVar <$> [g,g'])
 
-transPred, reach2Pred, reach3Pred :: C.PRED_SYMB
+initPred, transPred, reach2Pred, reach3Pred :: C.PRED_SYMB
+initPred   = C.mkQualPred (str2Id "init")
+                          (C.Pred_type [confSort] nullRange)
 transPred  = C.mkQualPred (str2Id "trans")
                           (C.Pred_type [confSort,evtSort,confSort] nullRange)
 reach2Pred = C.mkQualPred (str2Id "reachable2")
@@ -784,7 +816,7 @@ reach3Pred = C.mkQualPred (str2Id "reachable3")
                           (C.Pred_type [confSort,confSort] nullRange)
 
 ctrlOp :: C.OP_SYMB
-ctrlOp   = op (str2Token "ctrl") [confSort] ctrlSort
+ctrlOp = op (str2Token "ctrl") [confSort] ctrlSort
 
 ctrlSort, evtSort, natSort, confSort :: C.SORT
 ctrlSort = str2Id "Ctrl"

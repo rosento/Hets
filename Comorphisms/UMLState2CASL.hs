@@ -55,8 +55,14 @@ instance Comorphism UMLState2CASL
             return undefined
           csign = execState computeSign (CS.emptySign ())
           g = str2Token "g"
-          machine = CA.mkForall [CA.mkVarDecl g confSort]
-                                (edhml2CASL (lib2EDHML sign) (str2Token "g"))
-      return (csign, [makeNamed "machine" machine])
+          machine = CA.mkForall [CA.mkVarDecl g confSort] (
+                      initP (confVar g) `CA.mkImpl` edhml2CASL (lib2EDHML sign) g
+                    )
+      return ( csign
+             , [ makeNamed "init" $ initCASL sign
+               , makeNamed "machine" machine
+               ]
+             )
+
     map_sentence UMLState2CASL sen = undefined
     map_symbol UMLState2CASL lib tok = singleton $ CS.Symbol (token2Id tok) undefined

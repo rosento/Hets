@@ -218,7 +218,7 @@ translateFormula signWithRenamings nameS isAxiom' formula = do
       -- There is no QuantOp in SuleCFOL
       -- There is no QuantPred in SuleCFOL
       -- There is no ExtFORMULA in SuleCFOL
-      _ -> fail "SuleCFOL2TPTP: A formula that should not occur has occurred."
+      _ -> fail ("SuleCFOL2TPTP: A formula that should not occur has occurred." ++ ": " ++ show x)
 
     translateVarDecls :: [VAR_DECL] -> [(TAS.Variable, SORT)]
     translateVarDecls = concatMap translateVarDecl

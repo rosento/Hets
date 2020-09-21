@@ -421,7 +421,7 @@ ana_TRANS_ITEMS (TransI st1 st2 (Label t@(EvtI tname tvars) g a)) = do
       insertVars (v:vs) set = insertVars vs (v `Set.insert` set) -- TODO check duplicates
       varsWithTvar = insertVars tvars $ attrL lib
       actSkip   = Acts []
-      checkWhenJust m res f = maybe (return $ Just res) f m >> return (Just res)
+      checkWhenJust m res f = maybe (return $ Just res) f m
   when (st1 `Set.notMember` sts) $
     errC ("transition out of undefined state: " ++ show st1)
   when (st2 `Set.notMember` sts) $
@@ -504,7 +504,7 @@ lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML c0 is vs bs im1 im2 es)
     primeVars (x :/ y)     = primeVars x :/ primeVars y
 
     acts2psi Nothing = TrueF
-    acts2psi (Just (Acts as)) = foldAndF [ CompF (VarT v) Eq (primeVars t)
+    acts2psi (Just (Acts as)) = foldAndF [ CompF (VarT $ prime v) Eq t
                                          | Assign v t <- as
                                          ]
     im1 c = Map.findWithDefault id c (
@@ -541,14 +541,15 @@ computeEDHML :: STATE
              -> [EVENT_ITEM]
              -> EDHML
 computeEDHML c ((phi,e,psi,c'):is) vs bs im1 im2 es =
-  At c (
-    DiaAE e phi psi $ St c'
-  ) `andE` computeEDHML c is vs bs im1 im2 es
+    (At c $ DiaAE e phi psi $ St c')
+  `andE` computeEDHML c is vs bs im1 im2 es
 computeEDHML c [] (c':vs) bs im1 im2 es = computeEDHML c' (im1 c') vs bs im1 im2 es
 computeEDHML c [] []      bs im1 im2 es = fin bs im2 es `andE` pairsDiff bs
 
 pairsDiff :: [Token] -> EDHML
-pairsDiff bs = foldAndE [ Not $ At c1 $ St c2 | c1 <- bs, c2 <- bs ]
+pairsDiff bs = foldAndE [ Not $ At c1 $ St c2 | c1 <- bs, c2 <- bs, c1 /= c2]
+
+boxEE e phi f = Not $ DiaEE e phi $ Not f
 
 fin :: [STATE]
     -> ( (STATE, EVENT_NAME, Int) -> [(FORMULA, FORMULA, STATE)]
@@ -556,7 +557,7 @@ fin :: [STATE]
     -> [EVENT_ITEM]
     -> EDHML
 fin bs im2 es = foldAndE
-  [ At c $ foldAndE [ foldAndE [ DiaEE e (
+  [ At c $ foldAndE [ foldAndE [ boxEE e (
                                    (
                                      foldAndF [ phi :/\ psi
                                               | (phi, psi, c') <- ps
@@ -675,7 +676,7 @@ edhml2CASL (DiaAE e@(EvtI _ evars) phi psi f) g =
   let g' = prime g
   in univEvtArgs evars $ (
        stForm2CASL g g' phi `C.mkImpl` exConf g' (
-         trans g e g' `andC` stForm2CASL g g' phi `andC` edhml2CASL f g'
+         trans g e g' `andC` stForm2CASL g g' psi `andC` edhml2CASL f g'
        )
      )
 edhml2CASL (Not f)   g = notC $ edhml2CASL f g
@@ -702,10 +703,10 @@ stForm2CASL g g' (f :<=> f')  = stForm2CASL g g' f `C.mkEqv`  stForm2CASL g g' f
 
 term2CASLterm g g' (VarT var)      = attr2CASLterm g g' var
 term2CASLterm g g' (ConstT natLit) = natLit2CASL $ show natLit
-term2CASLterm g g' (x:+y)          = translOp g g' "+" x y
-term2CASLterm g g' (x:-y)          = translOp g g' "-" x y
-term2CASLterm g g' (x:*y)          = translOp g g' "*" x y
-term2CASLterm g g' (x:/y)          = translOp g g' "/" x y
+term2CASLterm g g' (x:+y)          = translOp g g' "__+__" x y
+term2CASLterm g g' (x:-y)          = translOp g g' "__-__" x y
+term2CASLterm g g' (x:*y)          = translOp g g' "__*__" x y
+term2CASLterm g g' (x:/y)          = translOp g g' "__/__" x y
 
 natLit2CASL :: String -> C.TERM f
 natLit2CASL ds = List.foldl (%%)
@@ -713,7 +714,7 @@ natLit2CASL ds = List.foldl (%%)
                             [constTerm (str2Token [d]) natSort | d <- ds]
 
 (%%) :: C.TERM f -> C.TERM f -> C.TERM f
-d %% e = C.mkAppl (op (str2Token "__%%__") [natSort,natSort] natSort)
+d %% e = C.mkAppl (op (str2Token "__@@__") [natSort,natSort] natSort)
                   [d,e]
 
 translOp :: Token -> Token -> String -> TERM -> TERM -> C.TERM f

@@ -116,7 +116,7 @@ data COMP_OP = Less | LessEq | Eq | GreaterEq | Greater deriving (Enum,Eq,Ord,D.
 instance Show COMP_OP where
   show Less      = "<"
   show LessEq    = "<="
-  show Eq        = "="
+  show Eq        = "=="
   show GreaterEq = ">="
   show Greater   = ">"
 
@@ -471,7 +471,7 @@ data EDHML = DtSen FORMULA
            | DiaEE EVENT_ITEM FORMULA EDHML -- exists valuation and transititon ...
            | DiaAE EVENT_ITEM FORMULA FORMULA EDHML -- for each valuation satisfying phi there exists a transition ...
            | Not EDHML
-           | Or EDHML EDHML
+           | And EDHML EDHML
            | TrueE
            deriving (Eq,Ord,Show,D.Data)
 
@@ -617,8 +617,9 @@ disjunctF  []   = FalseF
 disjunctF  phis = List.foldl1 (:\/) phis
 
 -- EDHML logic helpers
-andE :: EDHML -> EDHML -> EDHML
-phi `andE` psi = Not (Not phi `Or` Not psi)
+andE, orE:: EDHML -> EDHML -> EDHML
+phi `andE` psi = phi `And` psi
+phi `orE`  psi = Not (Not phi `And` Not psi)
 
 conjunctE :: [EDHML] -> EDHML
 conjunctE [] = TrueE
@@ -626,7 +627,7 @@ conjunctE fs = List.foldl1 andE fs
 
 disjunctE :: [EDHML] -> EDHML
 disjunctE [] = Not TrueE
-disjunctE fs = List.foldl1 Or fs
+disjunctE fs = List.foldl1 orE fs
 
 -- TODO handle EDHML signatures
 
@@ -638,7 +639,7 @@ edhmlRmNotNot (At c f)            = At c            $ edhmlRmNotNot f
 edhmlRmNotNot (Box f)             = Box             $ edhmlRmNotNot f
 edhmlRmNotNot (DiaEE e phi f)     = DiaEE e phi     $ edhmlRmNotNot f
 edhmlRmNotNot (DiaAE e phi psi f) = DiaAE e phi psi $ edhmlRmNotNot f
-edhmlRmNotNot (Or f f')           = edhmlRmNotNot f `Or` edhmlRmNotNot f'
+edhmlRmNotNot (f `And` f')        = edhmlRmNotNot f `And` edhmlRmNotNot f'
 edhmlRmNotNot f                   = f
 
 edhml2CASL :: Vars -> EDHML -> C.FORMULA f
@@ -673,9 +674,9 @@ edhml2CASL vars@(as,g,g') (DiaAE e@(EvtI _ evars) phi psi f) =
          trans g e g' `andC` stForm2CASL vars psi `andC` edhml2CASL newVars f
        )
      )
-edhml2CASL vars (Not f)     = notC $ edhml2CASL vars f
-edhml2CASL vars (f `Or` f') = edhml2CASL vars f `orC` edhml2CASL vars f'
-edhml2CASL vars TrueE       = C.trueForm
+edhml2CASL vars (Not f)      = notC $ edhml2CASL vars f
+edhml2CASL vars (f `And` f') = edhml2CASL vars f `andC` edhml2CASL vars f'
+edhml2CASL vars TrueE        = C.trueForm
 
 compOp2CASL :: COMP_OP -> C.PRED_SYMB
 compOp2CASL op = C.mkQualPred (str2Id ("__" ++ show op ++ "__"))
@@ -705,9 +706,10 @@ term2CASLterm vars (x:*y)          = translOp vars "__*__" x y
 term2CASLterm vars (x:/y)          = translOp vars "__/__" x y
 
 natLit2CASL :: String -> C.TERM f
-natLit2CASL ds = List.foldl (%%)
-                            (constTerm (str2Token "0") natSort)
-                            [constTerm (str2Token [d]) natSort | d <- ds]
+natLit2CASL [] = constTerm (str2Token "0") natSort
+natLit2CASL ds = List.foldl1 (%%) [ constTerm (str2Token [d]) natSort
+                                  | d <- ds
+                                  ]
 
 (%%) :: C.TERM f -> C.TERM f -> C.TERM f
 d %% e = C.mkAppl (op (str2Token "__@@__") [natSort,natSort] natSort)
@@ -823,3 +825,7 @@ ctrlSort = str2Id "Ctrl"
 evtSort  = str2Id "Evt"
 natSort  = str2Id "Nat"
 confSort = str2Id "Conf"
+
+
+sepCASL (C.Junction C.Con fs _) = concat (sepCASL <$> fs)
+sepCASL f = [f]

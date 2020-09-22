@@ -61,8 +61,9 @@ instance Comorphism UMLState2CASL
                     )
       return ( csign
              , [ makeNamed "init" $ initCASL sign
-               , makeNamed "machine" machine
-               ]
+               ] ++ [ makeNamed "machine" m
+                    | m <- sepCASL $ edhml2CASL vars (lib2EDHML sign)
+                    ]
              )
 
     map_sentence UMLState2CASL sen = undefined

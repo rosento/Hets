@@ -76,6 +76,7 @@ data TERM = VarT VAR_NAME
           | TERM :- TERM
           | TERM :* TERM
           | TERM :/ TERM
+          | TERM :& TERM
           deriving (Show,Ord,Eq,D.Data)
 data NAT_OP = Plus | Minus | Times | Div deriving (Eq,Ord,Show,D.Data)
 type VAR_NAME = Token
@@ -252,6 +253,7 @@ term :: Parsec [Char] st TERM
 term = buildExpressionParser ops simpTerm where
   ops = [ [symOpL "*" (:*), symOpL "/" (:/)]
         , [symOpL "+" (:+), symOpL "-" (:-)]
+        , [symOpL "&" (:&)]
         ]
   simpTerm = do VarT <$> var
          <|> do ConstT <$> natLit
@@ -454,6 +456,7 @@ ana_TERM vars (a :+ b) = ana_TERM vars a >> ana_TERM vars b
 ana_TERM vars (a :- b) = ana_TERM vars a >> ana_TERM vars b
 ana_TERM vars (a :* b) = ana_TERM vars a >> ana_TERM vars b
 ana_TERM vars (a :/ b) = ana_TERM vars a >> ana_TERM vars b
+ana_TERM vars (a :& b) = ana_TERM vars a >> ana_TERM vars b
   
 ana_STATE_ITEM :: STATE_ITEM -> Check STATE_ITEM
 ana_STATE_ITEM (StateI st) = do
@@ -463,11 +466,13 @@ ana_STATE_ITEM (StateI st) = do
   }
   return $ StateI st
 
+type EVENT_NAMES = C.TERM ()
+
 data EDHML = DtSen FORMULA
            | St STATE
            | Binding STATE EDHML
-           | At STATE EDHML -- add F?
-           | Box EDHML      -- add F?
+           | At EVENT_NAMES STATE EDHML -- add F?
+           | Box EVENT_NAMES EDHML      -- add F?
            | DiaEE EVENT_ITEM FORMULA EDHML -- exists valuation and transititon ...
            | DiaAE EVENT_ITEM FORMULA FORMULA EDHML -- for each valuation satisfying phi there exists a transition ...
            | Not EDHML
@@ -475,10 +480,10 @@ data EDHML = DtSen FORMULA
            | TrueE
            deriving (Eq,Ord,Show,D.Data)
 
-initP :: C.TERM f -> C.FORMULA f
+initP :: C.TERM () -> C.FORMULA ()
 initP g = C.mkPredication initPred [g]
 
-initCASL :: Library -> C.FORMULA f
+initCASL :: Library -> C.FORMULA ()
 initCASL lib = C.mkForall [C.mkVarDecl gTok confSort]  equiv
   where
     equiv = initP gTerm `C.mkEqv` defForm
@@ -489,11 +494,11 @@ initCASL lib = C.mkForall [C.mkVarDecl gTok confSort]  equiv
                         | (s0,phi0) <- initL lib
                         ]
       
-      
-
 lib2EDHML :: Library -> EDHML
-lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML c0 is vs bs im1 im2 es)
+lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML allEvts c0 is vs bs im1 im2 es)
   where
+    combineEvts (ename,_) _ enames = ename `cSetCons` enames
+    allEvts = Map.foldrWithKey combineEvts cSetNil $ actsL lib
     (c0, states) = Set.deleteFindMin $ statesL lib
     guard2phi = maybe TrueF id
 
@@ -525,7 +530,8 @@ lib2EDHML lib = assert `seq` edhmlRmNotNot (computeEDHML c0 is vs bs im1 im2 es)
              then error "Can't translate lib to EDHML: need at least one state"
              else ()
 
-computeEDHML :: STATE
+computeEDHML :: EVENT_NAMES
+             -> STATE
              -> [(FORMULA, EVENT_ITEM, FORMULA, STATE)]
              -> [STATE]
              -> [STATE]
@@ -534,41 +540,44 @@ computeEDHML :: STATE
                 )
              -> [EVENT_ITEM]
              -> EDHML
-computeEDHML c ((phi,e,psi,c'):is) vs bs im1 im2 es =
-    (At c $ DiaAE e phi psi $ St c')
-  `andE` computeEDHML c is vs bs im1 im2 es
-computeEDHML c [] (c':vs) bs im1 im2 es = computeEDHML c' (im1 c') vs bs im1 im2 es
-computeEDHML c [] []      bs im1 im2 es = fin bs im2 es `andE` pairsDiff bs
+computeEDHML allEvts c ((phi,e,psi,c'):is) vs bs im1 im2 es =
+    (At allEvts c $ DiaAE e phi psi $ St c')
+  `andE` computeEDHML allEvts c is vs bs im1 im2 es
+computeEDHML allEvts c [] (c':vs) bs im1 im2 es =
+  computeEDHML allEvts c' (im1 c') vs bs im1 im2 es
+computeEDHML allEvts c [] [] bs im1 im2 es =
+  fin allEvts bs im2 es `andE` pairsDiff allEvts bs
 
-pairsDiff :: [Token] -> EDHML
-pairsDiff bs = conjunctE [ Not $ At c1 $ St c2 | c1 <- bs, c2 <- bs, c1 /= c2]
+pairsDiff :: EVENT_NAMES -> [Token] -> EDHML
+pairsDiff allEvts bs = conjunctE [ Not $ At allEvts c1 $ St c2
+                                 | c1 <- bs, c2 <- bs, c1 /= c2
+                                 ]
 
 boxAA :: EVENT_ITEM -> FORMULA -> EDHML -> EDHML
 boxAA e phi f = Not $ DiaEE e phi $ Not f
 
-fin :: [STATE]
+fin :: EVENT_NAMES
+    -> [STATE]
     -> ( (STATE, EVENT_NAME, Int) -> [(FORMULA, FORMULA, STATE)]
        )
     -> [EVENT_ITEM]
     -> EDHML
-fin bs im2 es = conjunctE
-  [ At c $ conjunctE [ conjunctE [ boxAA e (
-                                     (
-                                       conjunctF [ phi :/\ psi
-                                                | (phi, psi, c') <- ps
-                                                ]
-                                     ) :/\ NotF (
-                                       disjunctF  [ phi :/\ psi
-                                                | (phi, psi, c') <- nps
-                                                ]
-                                     )
-                                   ) $ disjunctE [ St c'
-                                                 | (phi, psi, c') <- ps
-                                                 ]
-                                 | (ps, nps) <- complements c e im2
-                                 ]
-                      | e <- es
-                      ]
+fin allEvts bs im2 es = conjunctE
+  [ At allEvts c $ conjunctE [ boxAA e (
+                                 (
+                                   conjunctF [ phi :/\ psi
+                                             | (phi, psi, c') <- ps
+                                             ]
+                                 ) :/\ NotF (
+                                   disjunctF  [ phi :/\ psi
+                                              | (phi, psi, c') <- nps
+                                              ]
+                                 )
+                               ) $ disjunctE [ St c'
+                                             | (phi, psi, c') <- ps
+                                             ]
+                             | e <- es, (ps, nps) <- complements c e im2
+                             ]
   | c <- bs
   ]
 
@@ -591,19 +600,19 @@ complements c (EvtI ename evars) im2 =
 
 
 -- CASL logic helpers
-andC :: C.FORMULA f -> C.FORMULA f -> C.FORMULA f
+andC :: C.FORMULA () -> C.FORMULA () -> C.FORMULA ()
 a `andC` b = C.conjunct [a, b]
 
-orC :: C.FORMULA f -> C.FORMULA f -> C.FORMULA f
+orC :: C.FORMULA () -> C.FORMULA () -> C.FORMULA ()
 a `orC` b = C.disjunct [a, b]
 
-notC :: C.FORMULA f -> C.FORMULA f
+notC :: C.FORMULA () -> C.FORMULA ()
 notC a = C.Negation a nullRange
 
-conjunctC :: [C.FORMULA f] -> C.FORMULA f
+conjunctC :: [C.FORMULA ()] -> C.FORMULA ()
 conjunctC = C.conjunct
 
-disjunctC :: [C.FORMULA f] -> C.FORMULA f
+disjunctC :: [C.FORMULA ()] -> C.FORMULA ()
 disjunctC  = C.disjunct
 
 -- state FORMULA logic helpers
@@ -635,32 +644,32 @@ edhmlRmNotNot :: EDHML -> EDHML
 edhmlRmNotNot (Not (Not f))       = edhmlRmNotNot f
 edhmlRmNotNot (Not f)             = Not             $ edhmlRmNotNot f
 edhmlRmNotNot (Binding c f)       = Binding c       $ edhmlRmNotNot f
-edhmlRmNotNot (At c f)            = At c            $ edhmlRmNotNot f
-edhmlRmNotNot (Box f)             = Box             $ edhmlRmNotNot f
+edhmlRmNotNot (At evts c f)       = At evts c       $ edhmlRmNotNot f
+edhmlRmNotNot (Box evts f)        = Box evts        $ edhmlRmNotNot f
 edhmlRmNotNot (DiaEE e phi f)     = DiaEE e phi     $ edhmlRmNotNot f
 edhmlRmNotNot (DiaAE e phi psi f) = DiaAE e phi psi $ edhmlRmNotNot f
 edhmlRmNotNot (f `And` f')        = edhmlRmNotNot f `And` edhmlRmNotNot f'
 edhmlRmNotNot f                   = f
 
-edhml2CASL :: Vars -> EDHML -> C.FORMULA f
+edhml2CASL :: Vars -> EDHML -> C.FORMULA ()
 edhml2CASL vars (DtSen f) = stForm2CASL vars f
 edhml2CASL (_,g,_) (St s) = mkState s `C.mkStEq` ctrl (confVar g) -- TODO states bound or as ops?
 edhml2CASL vars@(_,g,_) (Binding s f) = exCtrl s (
                                                  mkState s `C.mkStEq` ctrl (confVar g)
                                           `andC` edhml2CASL vars f -- TODO check index "S union {s}"
                                         )
-edhml2CASL vars@(as,g,g') (At s f) =
+edhml2CASL vars@(as,g,g') (At evts s f) =
   let newVars = (as,g',prime g')
   in univConf g' (
        (
                 (ctrl (confVar g') `C.mkStEq` mkState s)
-         `andC` reach2 {- TODO F? -} g'
+         `andC` reach2 evts g'
        ) `C.mkImpl` edhml2CASL newVars f
      )
-edhml2CASL (as,g,g') (Box f) =
+edhml2CASL (as,g,g') (Box evts f) =
   let newVars = (as,g',prime g')
   in univConf g' (
-       reach3 g {- F? -} g' `C.mkImpl` edhml2CASL newVars f
+       reach3 evts g g' `C.mkImpl` edhml2CASL newVars f
      )
 edhml2CASL vars@(as,g,g') (DiaEE e@(EvtI _ evars) phi f) =
   let newVars = (as,g',prime g')
@@ -684,7 +693,7 @@ compOp2CASL op = C.mkQualPred (str2Id ("__" ++ show op ++ "__"))
 
 type Vars = (Set VAR_NAME,VAR_NAME,VAR_NAME)
 
-stForm2CASL :: Vars -> FORMULA -> C.FORMULA f
+stForm2CASL :: Vars -> FORMULA -> C.FORMULA ()
 stForm2CASL vars (CompF x op y) =
   compOp2CASL op `C.mkPredication` [ term2CASLterm vars x
                                    , term2CASLterm vars y
@@ -704,23 +713,24 @@ term2CASLterm vars (x:+y)          = translOp vars "__+__" x y
 term2CASLterm vars (x:-y)          = translOp vars "__-__" x y
 term2CASLterm vars (x:*y)          = translOp vars "__*__" x y
 term2CASLterm vars (x:/y)          = translOp vars "__/__" x y
+term2CASLterm vars (x:&y)          = translOp vars "__&__" x y
 
-natLit2CASL :: String -> C.TERM f
+natLit2CASL :: String -> C.TERM ()
 natLit2CASL [] = constTerm (str2Token "0") natSort
 natLit2CASL ds = List.foldl1 (%%) [ constTerm (str2Token [d]) natSort
                                   | d <- ds
                                   ]
 
-(%%) :: C.TERM f -> C.TERM f -> C.TERM f
+(%%) :: C.TERM () -> C.TERM () -> C.TERM ()
 d %% e = C.mkAppl (op (str2Token "__@@__") [natSort,natSort] natSort)
                   [d,e]
 
-translOp :: Vars -> String -> TERM -> TERM -> C.TERM f
+translOp :: Vars -> String -> TERM -> TERM -> C.TERM ()
 translOp vars opName x y = C.mkAppl (op (str2Token opName) [natSort,natSort] natSort)
                                     (term2CASLterm vars <$> [x,y])
 
 -- TODO: consider bound variables as opposed to attributes
-var2CASLterm :: Vars -> VAR_NAME -> C.TERM f
+var2CASLterm :: Vars -> VAR_NAME -> C.TERM ()
 var2CASLterm  (attrs,g,g') var = if unprime var `Set.member` attrs
                                  then attrT
                                  else eVarT
@@ -736,13 +746,16 @@ primed = (=='\'') . last . token2Str
 unprime :: VAR_NAME -> VAR_NAME
 unprime = str2Token . reverse . dropWhile (=='\'') . reverse . token2Str
 
-eventItem2CASLterm :: EVENT_ITEM -> C.TERM f
-eventItem2CASLterm (EvtI (Token name _) vars) =
-  C.mkAppl ( op (str2Token ("evt_" ++ name))
+eventItem2CASLterm :: EVENT_ITEM -> C.TERM ()
+eventItem2CASLterm (EvtI name vars) =
+  C.mkAppl ( op (prefixEvt name)
                 (const natSort <$> vars)
                 evtSort
            )
            (flip C.mkVarTerm natSort <$> vars)
+
+prefixEvt (Token name _) = str2Token ("evt_" ++ name)
+prefixEvtName (Token name _) = str2Token ("evtName_" ++ name)
 
 str2Id :: String -> Id
 str2Id = token2Id . str2Token
@@ -755,21 +768,21 @@ token2Str (Token s _) = s
 str2Token :: String -> Token
 str2Token name = Token name nullRange
 
-exEvtArgs :: [C.VAR] -> C.FORMULA f -> C.FORMULA f
+exEvtArgs :: [C.VAR] -> C.FORMULA () -> C.FORMULA ()
 exEvtArgs   []    phi = phi
 exEvtArgs   evars phi = C.mkExist  [C.Var_decl evars natSort nullRange] phi
 
-univEvtArgs :: [C.VAR] -> C.FORMULA f -> C.FORMULA f
+univEvtArgs :: [C.VAR] -> C.FORMULA () -> C.FORMULA ()
 univEvtArgs []    phi = phi
 univEvtArgs evars phi = C.mkForall [C.Var_decl evars natSort nullRange] phi
 
-exCtrl :: C.VAR -> C.FORMULA f -> C.FORMULA f
+exCtrl :: C.VAR -> C.FORMULA () -> C.FORMULA ()
 exCtrl s f = C.mkExist [C.mkVarDecl s ctrlSort] f
 
-exConf :: C.VAR -> C.FORMULA f -> C.FORMULA f
+exConf :: C.VAR -> C.FORMULA () -> C.FORMULA ()
 exConf   g f = C.mkExist  [C.mkVarDecl g confSort] f
 
-univConf :: C.VAR -> C.FORMULA f -> C.FORMULA f
+univConf :: C.VAR -> C.FORMULA () -> C.FORMULA ()
 univConf g f = C.mkForall [C.mkVarDecl g confSort] f
 
 prime :: Token -> Token
@@ -779,33 +792,40 @@ op :: Token -> [C.SORT] -> C.SORT -> C.OP_SYMB
 op name argTys resTy = C.mkQualOp (token2Id name)
                                   (C.Op_type C.Total argTys resTy nullRange)
 
-constTerm :: Token -> C.SORT -> C.TERM f
+constTerm :: Token -> C.SORT -> C.TERM ()
 constTerm opName sort = op opName [] sort `C.mkAppl` []
 
-mkState :: Token -> C.TERM f
+mkState :: Token -> C.TERM ()
 mkState name = op name [] ctrlSort `C.mkAppl` []
 
-mkVar :: C.VAR -> C.SORT -> C.TERM f
+mkVar :: C.VAR -> C.SORT -> C.TERM ()
 mkVar name sort = C.toQualVar $ C.mkVarDecl name sort
 
 
-trans :: C.VAR -> EVENT_ITEM -> C.VAR -> C.FORMULA f
+trans :: C.VAR -> EVENT_ITEM -> C.VAR -> C.FORMULA ()
 trans g e g' = C.mkPredication transPred [ confVar g
                                          , eventItem2CASLterm e
                                          , confVar g'
                                          ]
 
-confVar :: C.VAR -> C.TERM f
+confVar :: C.VAR -> C.TERM ()
 confVar g = C.mkVarTerm g confSort
 
-ctrl :: C.TERM f -> C.TERM f
+ctrl :: C.TERM () -> C.TERM ()
 ctrl g = ctrlOp `C.mkAppl` [g]
 
-reach2 :: C.VAR -> C.FORMULA f
-reach2 g = C.mkPredication reach2Pred [confVar g]
+reach2 :: EVENT_NAMES -> C.VAR -> C.FORMULA ()
+reach2 evts g = C.mkPredication reach2Pred [evts, confVar g]
 
-reach3 :: C.VAR -> C.VAR -> C.FORMULA f
-reach3 g g' = C.mkPredication reach3Pred (confVar <$> [g,g'])
+reach3 :: EVENT_NAMES -> C.VAR -> C.VAR -> C.FORMULA ()
+reach3 evts g g' = C.mkPredication reach3Pred [evts, confVar g, confVar g']
+
+cSetCons :: EVENT_NAME -> EVENT_NAMES -> EVENT_NAMES
+e `cSetCons` es = C.mkAppl (op (str2Token "__+__") [evtNameSort,evtNameSetSort] evtNameSetSort)
+                           [constTerm (prefixEvtName e) evtNameSort, es]
+
+cSetNil :: EVENT_NAMES
+cSetNil = constTerm (str2Token "{}") evtNameSetSort
 
 initPred, transPred, reach2Pred, reach3Pred :: C.PRED_SYMB
 initPred   = C.mkQualPred (str2Id "init")
@@ -813,19 +833,24 @@ initPred   = C.mkQualPred (str2Id "init")
 transPred  = C.mkQualPred (str2Id "trans")
                           (C.Pred_type [confSort,evtSort,confSort] nullRange)
 reach2Pred = C.mkQualPred (str2Id "reachable2")
-                          (C.Pred_type [confSort] nullRange)
+                          (C.Pred_type [evtNameSetSort,confSort] nullRange)
 reach3Pred = C.mkQualPred (str2Id "reachable3")
-                          (C.Pred_type [confSort,confSort] nullRange)
+                          (C.Pred_type [evtNameSetSort,confSort,confSort] nullRange)
 
 ctrlOp :: C.OP_SYMB
 ctrlOp = op (str2Token "ctrl") [confSort] ctrlSort
 
-ctrlSort, evtSort, natSort, confSort :: C.SORT
-ctrlSort = str2Id "Ctrl"
-evtSort  = str2Id "Evt"
-natSort  = str2Id "Nat"
-confSort = str2Id "Conf"
+evtNameOp :: C.OP_SYMB
+evtNameOp = op (str2Token "evtName") [evtSort] evtNameSort
 
+ctrlSort, evtSort, natSort, confSort, evtNameSort, evtNameSetSort :: C.SORT
+ctrlSort       = str2Id "Ctrl"
+evtSort        = str2Id "Evt"
+natSort        = str2Id "Nat"
+confSort       = str2Id "Conf"
+evtNameSort    = str2Id "EvtName"
+evtNameSetSort = str2Id "EvtNameSet"
 
+sepCASL :: C.FORMULA f -> [C.FORMULA f]
 sepCASL (C.Junction C.Con fs _) = concat (sepCASL <$> fs)
 sepCASL f = [f]

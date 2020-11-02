@@ -96,9 +96,11 @@ instance Comorphism UMLState2CASL
                      | ((o,ar),_) <- Map.toList $ actsL sign
                 ] ++ [ (token2Id o, Set.fromList[CS.OpType CA.Total [confSort] natSort])
                      | o <- Set.toList $ attrL sign
-                     ]
-                  ++ [ (str2Id "ctrl", Set.fromList[CS.OpType CA.Total [confSort] ctrlSort])
+                ] ++ [ (str2Id "ctrl", Set.fromList[CS.OpType CA.Total [confSort] ctrlSort])
                      , (str2Id "conf", Set.fromList[CS.OpType CA.Total ([ctrlSort] ++ take (Set.size $ attrL sign) (repeat natSort)) confSort])
+                     , (str2Id "evtName", Set.fromList[CS.OpType CA.Total [evtSort] evtNameSort])
+                ] ++ [ (token2Id s, Set.fromList[CS.OpType CA.Total [] ctrlSort])
+                     | s <- Set.toList $ statesL sign
                      ]
               )
             }
